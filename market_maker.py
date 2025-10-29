@@ -81,6 +81,8 @@ class AsterDexClient:
             return response.json()
         except requests.exceptions.RequestException as e:
             print(f"API请求错误 ({self.account_name}): {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f" 错误响应: {e.response.text}")
             return {'error': str(e)}
     
     def preload_symbol_precision(self, symbol: str) -> bool:
@@ -173,12 +175,14 @@ class AsterDexClient:
         tick_size, step_size = self.get_symbol_precision(symbol)
         
         # 格式化数量
-        formatted_quantity = self.__get_trimmed_quantity(quantity, step_size)
+        # formatted_quantity = self.__get_trimmed_quantity(quantity, step_size)
+        formatted_quantity = round(quantity,2)
         
         # 格式化价格（如果是限价单）
         formatted_price = None
         if price is not None and order_type != 'MARKET':
-            formatted_price = self.__get_trimmed_price(price, tick_size)
+            # formatted_price = self.__get_trimmed_price(price, tick_size)
+            formatted_price = round(price,5)
         
         params = {
             'symbol': symbol,
@@ -585,7 +589,7 @@ class SmartMarketMaker:
             print(f"限价卖单已挂出: 价格={sell_price:.6f}, 数量={sell_quantity:.4f}, 订单ID={sell_order_id}")
             
             # 等待一下让卖单进入订单簿
-            time.sleep(0.1)
+            # time.sleep(0.1)
             
             # 下市价买单（固定配置量）
             buy_order = buy_client.create_order(
