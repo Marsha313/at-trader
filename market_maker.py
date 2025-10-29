@@ -19,10 +19,6 @@ class TradingStrategy(Enum):
     LIMIT_MARKET = "limit_market"
     BOTH = "both"
 
-class TradeDirection(Enum):
-    ACCOUNT1_SELL_ACCOUNT2_BUY = "acc1_sell_acc2_buy"
-    ACCOUNT1_BUY_ACCOUNT2_SELL = "acc1_buy_acc2_sell"
-
 @dataclass
 class OrderBook:
     bids: List[List[float]]
@@ -292,13 +288,7 @@ class SmartMarketMaker:
         # 预加载交易对精度信息
         self.preload_precision_info()
         
-        # 交易方向管理
-        initial_holder = os.getenv('INITIAL_AT_HOLDER', 'ACCOUNT1')
-        if initial_holder.upper() == 'ACCOUNT1':
-            self.current_direction = TradeDirection.ACCOUNT1_SELL_ACCOUNT2_BUY
-        else:
-            self.current_direction = TradeDirection.ACCOUNT1_BUY_ACCOUNT2_SELL
-        
+        # 移除固定交易方向配置，改为动态判断
         self.total_volume = 0
         self.is_running = False
         self.order_book = OrderBook(bids=[], asks=[], update_time=0)
@@ -309,6 +299,24 @@ class SmartMarketMaker:
         self.trade_count = 0
         self.successful_trades = 0
         
+    def determine_trade_direction(self) -> Tuple[str, str]:
+        """自动判断交易方向：返回 (sell_client_name, buy_client_name)"""
+        at_balance1 = self.client1.get_asset_balance(self.base_asset)
+        at_balance2 = self.client2.get_asset_balance(self.base_asset)
+        
+        print(f"账户余额对比: 账户1 {self.base_asset}={at_balance1:.4f}, 账户2 {self.base_asset}={at_balance2:.4f}")
+        
+        if at_balance1 >= at_balance2:
+            print("🎯 选择策略: 账户1卖出，账户2买入")
+            return 'ACCOUNT1', 'ACCOUNT2'
+        else:
+            print("🎯 选择策略: 账户2卖出，账户1买入")
+            return 'ACCOUNT2', 'ACCOUNT1'
+    
+    def get_current_trade_direction(self) -> Tuple[str, str]:
+        """获取当前交易方向"""
+        return self.determine_trade_direction()
+    
     def preload_precision_info(self):
         """预加载所有需要的交易对精度信息"""
         print("🔄 预加载交易对精度信息...")
@@ -374,25 +382,29 @@ class SmartMarketMaker:
         
         return max(returns) if returns else 0
     
-    def get_sell_quantity(self) -> float:
-        """获取实际可卖数量"""
-        if self.current_direction == TradeDirection.ACCOUNT1_SELL_ACCOUNT2_BUY:
-            # 账户1卖AT
-            available_at = self.client1.get_asset_balance(self.base_asset)
-        else:
-            # 账户2卖AT
-            available_at = self.client2.get_asset_balance(self.base_asset)
+    def get_sell_quantity(self) -> Tuple[float, str]:
+        """获取实际可卖数量和卖出账户"""
+        sell_client_name, _ = self.get_current_trade_direction()
         
-        return available_at
+        if sell_client_name == 'ACCOUNT1':
+            available_at = self.client1.get_asset_balance(self.base_asset)
+            sell_account = 'ACCOUNT1'
+        else:
+            available_at = self.client2.get_asset_balance(self.base_asset)
+            sell_account = 'ACCOUNT2'
+        
+        return available_at, sell_account
     
     def check_buy_conditions(self) -> bool:
         """检查买单条件：USDT余额是否足够"""
-        if self.current_direction == TradeDirection.ACCOUNT1_SELL_ACCOUNT2_BUY:
-            # 账户2买AT，需要USDT
-            available_usdt = self.client2.get_asset_balance(self.quote_asset)
-        else:
+        _, buy_client_name = self.get_current_trade_direction()
+        
+        if buy_client_name == 'ACCOUNT1':
             # 账户1买AT，需要USDT
             available_usdt = self.client1.get_asset_balance(self.quote_asset)
+        else:
+            # 账户2买AT，需要USDT
+            available_usdt = self.client2.get_asset_balance(self.quote_asset)
         
         # 计算需要的USDT金额
         bid, ask, _, _ = self.get_best_bid_ask()
@@ -410,9 +422,9 @@ class SmartMarketMaker:
     
     def check_sell_conditions(self) -> bool:
         """检查卖单条件：AT余额是否足够（至少要有一些AT可卖）"""
-        sell_quantity = self.get_sell_quantity()
+        sell_quantity, sell_account = self.get_sell_quantity()
         if sell_quantity <= 0:
-            print("无可卖AT数量")
+            print(f"账户 {sell_account} 无可卖{self.base_asset}数量")
             return False
         return True
     
@@ -449,17 +461,12 @@ class SmartMarketMaker:
             print(f"深度不足: 买一量={bid_qty:.2f}, 卖一量={ask_qty:.2f}, 要求={min_required_depth:.2f}")
             return False
             
-        sell_quantity = self.get_sell_quantity()
-        print(f"✓ 市场条件满足: 价差={spread:.4%}, 波动={volatility:.4%}, 卖量={sell_quantity:.4f}, 买量={self.fixed_buy_quantity:.4f}")
+        sell_quantity, sell_account = self.get_sell_quantity()
+        _, buy_account = self.get_current_trade_direction()
+        
+        print(f"✓ 市场条件满足: 价差={spread:.4%}, 波动={volatility:.4%}")
+        print(f"  交易方向: {sell_account}卖出{sell_quantity:.4f}, {buy_account}买入{self.fixed_buy_quantity:.4f}")
         return True
-    
-    def switch_trade_direction(self):
-        """切换交易方向"""
-        if self.current_direction == TradeDirection.ACCOUNT1_SELL_ACCOUNT2_BUY:
-            self.current_direction = TradeDirection.ACCOUNT1_BUY_ACCOUNT2_SELL
-        else:
-            self.current_direction = TradeDirection.ACCOUNT1_SELL_ACCOUNT2_BUY
-        print(f"切换交易方向: {self.current_direction.value}")
     
     def strategy_market_only(self) -> bool:
         """策略1: 同时挂市价单对冲"""
@@ -468,30 +475,23 @@ class SmartMarketMaker:
         try:
             timestamp = int(time.time() * 1000)
             
-            if self.current_direction == TradeDirection.ACCOUNT1_SELL_ACCOUNT2_BUY:
-                # 账户1卖（实际持有量），账户2买（固定配置量）
-                sell_client = self.client1
-                buy_client = self.client2
-                sell_order_id = f"acc1_sell_{timestamp}"
-                buy_order_id = f"acc2_buy_{timestamp}"
-                
-                # 卖单数量：实际持有量
-                sell_quantity = self.get_sell_quantity()
-                # 买单数量：固定配置量
-                buy_quantity = self.fixed_buy_quantity
-            else:
-                # 账户2卖（实际持有量），账户1买（固定配置量）
-                sell_client = self.client2
-                buy_client = self.client1
-                sell_order_id = f"acc2_sell_{timestamp}"
-                buy_order_id = f"acc1_buy_{timestamp}"
-                
-                # 卖单数量：实际持有量
-                sell_quantity = self.get_sell_quantity()
-                # 买单数量：固定配置量
-                buy_quantity = self.fixed_buy_quantity
+            # 动态获取交易方向
+            sell_client_name, buy_client_name = self.get_current_trade_direction()
             
-            print(f"交易详情: 卖单数量={sell_quantity:.4f}, 买单数量={buy_quantity:.4f}")
+            # 确定买卖客户端
+            sell_client = self.client1 if sell_client_name == 'ACCOUNT1' else self.client2
+            buy_client = self.client1 if buy_client_name == 'ACCOUNT1' else self.client2
+            
+            # 生成订单ID
+            sell_order_id = f"{sell_client_name.lower()}_sell_{timestamp}"
+            buy_order_id = f"{buy_client_name.lower()}_buy_{timestamp}"
+            
+            # 卖单数量：实际持有量
+            sell_quantity, _ = self.get_sell_quantity()
+            # 买单数量：固定配置量
+            buy_quantity = self.fixed_buy_quantity
+            
+            print(f"交易详情: {sell_client_name}卖出={sell_quantity:.4f}, {buy_client_name}买入={buy_quantity:.4f}")
             
             # 同时下市价单
             sell_order = sell_client.create_order(
@@ -527,9 +527,6 @@ class SmartMarketMaker:
                 (buy_client, buy_order_id)
             ])
             
-            if success:
-                self.switch_trade_direction()
-            
             return success
             
         except Exception as e:
@@ -544,33 +541,26 @@ class SmartMarketMaker:
             bid, ask, _, _ = self.get_best_bid_ask()
             timestamp = int(time.time() * 1000)
             
-            if self.current_direction == TradeDirection.ACCOUNT1_SELL_ACCOUNT2_BUY:
-                # 账户1挂限价卖单（实际持有量），账户2下市价买单（固定配置量）
-                sell_client = self.client1
-                buy_client = self.client2
-                sell_order_id = f"acc1_limit_sell_{timestamp}"
-                buy_order_id = f"acc2_market_buy_{timestamp}"
-                
-                # 卖单数量：实际持有量
-                sell_quantity = self.get_sell_quantity()
-                # 买单数量：固定配置量
-                buy_quantity = self.fixed_buy_quantity
-            else:
-                # 账户2挂限价卖单（实际持有量），账户1下市价买单（固定配置量）
-                sell_client = self.client2
-                buy_client = self.client1
-                sell_order_id = f"acc2_limit_sell_{timestamp}"
-                buy_order_id = f"acc1_market_buy_{timestamp}"
-                
-                # 卖单数量：实际持有量
-                sell_quantity = self.get_sell_quantity()
-                # 买单数量：固定配置量
-                buy_quantity = self.fixed_buy_quantity
+            # 动态获取交易方向
+            sell_client_name, buy_client_name = self.get_current_trade_direction()
+            
+            # 确定买卖客户端
+            sell_client = self.client1 if sell_client_name == 'ACCOUNT1' else self.client2
+            buy_client = self.client1 if buy_client_name == 'ACCOUNT1' else self.client2
+            
+            # 生成订单ID
+            sell_order_id = f"{sell_client_name.lower()}_limit_sell_{timestamp}"
+            buy_order_id = f"{buy_client_name.lower()}_market_buy_{timestamp}"
+            
+            # 卖单数量：实际持有量
+            sell_quantity, _ = self.get_sell_quantity()
+            # 买单数量：固定配置量
+            buy_quantity = self.fixed_buy_quantity
             
             # 设置卖单价格为卖一价减0.00001
             sell_price = ask - 0.00001
             
-            print(f"交易详情: 卖单数量={sell_quantity:.4f}, 卖单价格={sell_price:.5f}, 买单数量={buy_quantity:.4f}")
+            print(f"交易详情: {sell_client_name}卖出={sell_quantity:.4f}@{sell_price:.5f}, {buy_client_name}买入={buy_quantity:.4f}")
             
             # 挂限价卖单（实际持有量）
             sell_order = sell_client.create_order(
@@ -589,7 +579,7 @@ class SmartMarketMaker:
             print(f"限价卖单已挂出: 价格={sell_price:.6f}, 数量={sell_quantity:.4f}, 订单ID={sell_order_id}")
             
             # 等待一下让卖单进入订单簿
-            # time.sleep(0.1)
+            # time.sleep(0.05)
             
             # 下市价买单（固定配置量）
             buy_order = buy_client.create_order(
@@ -636,7 +626,7 @@ class SmartMarketMaker:
                     sell_client.cancel_order(self.symbol, origClientOrderId=sell_order_id)
                     
                     # 立即下市价卖单，卖出实际持有的AT数量
-                    emergency_sell_quantity = self.get_sell_quantity()  # 重新获取当前可卖数量
+                    emergency_sell_quantity, _ = self.get_sell_quantity()  # 重新获取当前可卖数量
                     if emergency_sell_quantity > 0:
                         emergency_sell = sell_client.create_order(
                             symbol=self.symbol,
@@ -667,9 +657,6 @@ class SmartMarketMaker:
                 sell_client.cancel_order(self.symbol, origClientOrderId=sell_order_id)
             
             success = buy_filled and sell_filled
-            if success:
-                self.switch_trade_direction()
-            
             return success
             
         except Exception as e:
@@ -736,7 +723,11 @@ class SmartMarketMaker:
             # 交易量计算：买卖双方都计入，使用固定买单数量
             trade_volume = self.fixed_buy_quantity * 2
             self.total_volume += trade_volume
-            print(f"✓ 交易成功! 本次交易量: {trade_volume:.4f}, 累计: {self.total_volume:.2f}/{self.target_volume}")
+            
+            # 显示当前交易方向
+            sell_account, buy_account = self.get_current_trade_direction()
+            print(f"✓ 交易成功! {sell_account}卖出 → {buy_account}买入")
+            print(f"  本次交易量: {trade_volume:.4f}, 累计: {self.total_volume:.2f}/{self.target_volume}")
         else:
             print("✗ 交易失败")
         
@@ -756,6 +747,10 @@ class SmartMarketMaker:
             
             print(f"账户1: {self.base_asset}={at_balance1:.4f}, {self.quote_asset}={usdt_balance1:.2f}")
             print(f"账户2: {self.base_asset}={at_balance2:.4f}, {self.quote_asset}={usdt_balance2:.2f}")
+            
+            # 显示当前推荐交易方向
+            sell_account, buy_account = self.get_current_trade_direction()
+            print(f"推荐方向: {sell_account}卖出 → {buy_account}买入")
             
         except Exception as e:
             print(f"获取余额时出错: {e}")
@@ -780,7 +775,10 @@ class SmartMarketMaker:
                         self.print_account_balances()
                 else:
                     consecutive_failures += 1
-                    time.sleep(2)
+                    if consecutive_failures >= 3:
+                        print("连续多次交易失败，暂停20秒...")
+                        time.sleep(20)
+                        consecutive_failures = 0
                 
                 # 显示进度
                 progress = self.total_volume / self.target_volume * 100
@@ -801,19 +799,18 @@ class SmartMarketMaker:
     def start(self):
         """启动交易程序"""
         print("=" * 60)
-        print("智能刷量交易程序启动 - 优化精度缓存")
+        print("智能刷量交易程序启动 - 自动判断交易方向")
         print(f"交易对: {self.symbol}")
         print(f"基础资产: {self.base_asset}")
         print(f"策略: {self.strategy.value}")
         print(f"固定买单数量: {self.fixed_buy_quantity}")
-        print(f"初始方向: {self.current_direction.value}")
         print(f"目标交易量: {self.target_volume}")
         print(f"价差阈值: {self.max_spread:.2%}")
         print(f"波动阈值: {self.max_price_change:.2%}")
         print("=" * 60)
         
-        # 打印初始余额
-        print("初始账户余额:")
+        # 打印初始余额和推荐方向
+        print("初始账户余额和推荐交易方向:")
         self.print_account_balances()
         print()
         
