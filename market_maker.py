@@ -341,6 +341,7 @@ class SmartMarketMaker:
         # 历史交易量统计
         self.historical_volume_account1 = 0.0
         self.historical_volume_account2 = 0.0
+        self.total_historical_volume = 0.0
         
     def calculate_historical_volume(self):
         """计算历史所有AT现货交易量总和（以USDT为单位）"""
@@ -358,10 +359,10 @@ class SmartMarketMaker:
                     quote_qty = float(trade.get('quoteQty', 0))
                     self.historical_volume_account1 += quote_qty
                     
-            print(f"账户1 {self.symbol} 历史交易量: {self.historical_volume_account1:.2f} USDT")
+            print(f"✅ 账户1 {self.symbol} 历史交易量: {self.historical_volume_account1:.2f} USDT")
             
         except Exception as e:
-            print(f"获取账户1历史交易量失败: {e}")
+            print(f"❌ 获取账户1历史交易量失败: {e}")
         
         # 计算账户2的历史交易量
         try:
@@ -375,15 +376,15 @@ class SmartMarketMaker:
                     quote_qty = float(trade.get('quoteQty', 0))
                     self.historical_volume_account2 += quote_qty
                     
-            print(f"账户2 {self.symbol} 历史交易量: {self.historical_volume_account2:.2f} USDT")
+            print(f"✅ 账户2 {self.symbol} 历史交易量: {self.historical_volume_account2:.2f} USDT")
             
         except Exception as e:
-            print(f"获取账户2历史交易量失败: {e}")
+            print(f"❌ 获取账户2历史交易量失败: {e}")
         
-        total_historical_volume = self.historical_volume_account1 + self.historical_volume_account2
-        print(f"💰 总历史AT现货交易量: {total_historical_volume:.2f} USDT")
+        self.total_historical_volume = self.historical_volume_account1 + self.historical_volume_account2
+        print(f"💰 总历史AT现货交易量: {self.total_historical_volume:.2f} USDT")
         
-        return total_historical_volume
+        return self.total_historical_volume
     
     def get_cached_trade_direction(self) -> Tuple[str, str]:
         """获取缓存的交易方向，如果缓存不存在则计算"""
@@ -989,14 +990,17 @@ class SmartMarketMaker:
         print("✅ 缓存数据初始化完成")
         
         # 计算历史交易量
+        print("\n📊 开始统计历史AT现货交易量...")
         self.calculate_historical_volume()
         
         # 打印初始余额和推荐方向
-        print("初始账户余额和推荐交易方向:")
+        print("\n初始账户余额和推荐交易方向:")
         self.print_account_balances()
         print()
         
         # 启动交易
+        print("\n5秒后开始交易...")
+        time.sleep(5)
         self.monitor_and_trade()
     
     def stop(self):
