@@ -308,6 +308,9 @@ class SmartMarketMaker:
         # 交易统计
         self.trade_count = 0
         self.successful_trades = 0
+        self.limit_sell_success_count = 0  # 卖单限价单成功次数
+        self.market_sell_success_count = 0  # 卖单市价单成功次数
+        self.limit_sell_attempt_count = 0   # 卖单限价单尝试次数
         
     def get_cached_trade_direction(self) -> Tuple[str, str]:
         """获取缓存的交易方向，如果缓存不存在则计算"""
@@ -549,8 +552,9 @@ class SmartMarketMaker:
                 (buy_client, buy_order_id)
             ])
             
-            # 交易成功后更新缓存
+            # 交易成功后更新缓存和统计
             if success:
+                self.market_sell_success_count += 1
                 self.update_cache_after_trade()
             
             return success
@@ -588,6 +592,9 @@ class SmartMarketMaker:
             
             print(f"交易详情: {sell_client_name}卖出={sell_quantity:.4f}@{sell_price:.5f}, {buy_client_name}买入={buy_quantity:.4f}")
             
+            # 记录限价卖单尝试
+            self.limit_sell_attempt_count += 1
+            
             # 挂限价卖单（实际持有量）
             sell_order = sell_client.create_order(
                 symbol=self.symbol,
@@ -624,6 +631,7 @@ class SmartMarketMaker:
             start_time = time.time()
             buy_filled = False
             sell_filled = False
+            sell_was_limit = True  # 标记卖单是否为限价单
             
             while time.time() - start_time < self.order_timeout:
                 # 检查买单状态
@@ -639,6 +647,9 @@ class SmartMarketMaker:
                     if sell_status.get('status') in ['FILLED', 'PARTIALLY_FILLED']:
                         sell_filled = True
                         print("限价卖单已成交")
+                        # 记录限价卖单成功
+                        if sell_was_limit:
+                            self.limit_sell_success_count += 1
                 
                 if buy_filled and sell_filled:
                     break
@@ -647,6 +658,9 @@ class SmartMarketMaker:
                 if buy_filled and not sell_filled:
                     print("检测到风险: 买单成交但卖单未成交，转为市价卖出")
                     sell_client.cancel_order(self.symbol, origClientOrderId=sell_order_id)
+                    
+                    # 标记卖单已转为市价单
+                    sell_was_limit = False
                     
                     # 立即下市价卖单，卖出实际持有的AT数量
                     emergency_sell_quantity, _ = self.get_sell_quantity()  # 重新获取当前可卖数量
@@ -664,6 +678,8 @@ class SmartMarketMaker:
                             # 等待卖单成交
                             time.sleep(2)
                             sell_filled = True
+                            # 记录市价卖单成功
+                            self.market_sell_success_count += 1
                         else:
                             print("紧急市价卖单失败")
                             return False
@@ -676,7 +692,7 @@ class SmartMarketMaker:
             # 清理未成交订单
             if not buy_filled:
                 buy_client.cancel_order(self.symbol, origClientOrderId=buy_order_id)
-            if not sell_filled:
+            if not sell_filled and sell_was_limit:  # 只有限价单才需要取消
                 sell_client.cancel_order(self.symbol, origClientOrderId=sell_order_id)
             
             success = buy_filled and sell_filled
@@ -789,6 +805,26 @@ class SmartMarketMaker:
         
         return success
     
+    def print_trading_statistics(self):
+        """打印交易统计信息"""
+        print("\n📊 交易统计信息:")
+        print(f"   总尝试次数: {self.trade_count}")
+        print(f"   成功交易次数: {self.successful_trades}")
+        
+        if self.trade_count > 0:
+            success_rate = (self.successful_trades / self.trade_count) * 100
+            print(f"   总体成功率: {success_rate:.1f}%")
+        
+        print(f"   卖单限价单尝试次数: {self.limit_sell_attempt_count}")
+        print(f"   卖单限价单成功次数: {self.limit_sell_success_count}")
+        
+        if self.limit_sell_attempt_count > 0:
+            limit_sell_success_rate = (self.limit_sell_success_count / self.limit_sell_attempt_count) * 100
+            print(f"   卖单限价单成功率: {limit_sell_success_rate:.1f}%")
+        
+        print(f"   卖单市价单成功次数: {self.market_sell_success_count}")
+        print(f"   累计交易量: {self.total_volume:.2f}/{self.target_volume}")
+    
     def print_account_balances(self):
         """打印账户余额（使用缓存数据）"""
         try:
@@ -824,9 +860,10 @@ class SmartMarketMaker:
                 # 执行交易
                 if self.execute_trading_cycle():
                     consecutive_failures = 0
-                    # 每5次成功交易打印一次余额
+                    # 每5次成功交易打印一次余额和统计
                     if self.successful_trades % 5 == 0:
                         self.print_account_balances()
+                        self.print_trading_statistics()
                 else:
                     consecutive_failures += 1
                     if consecutive_failures >= 3:
@@ -882,7 +919,11 @@ class SmartMarketMaker:
         """停止交易"""
         self.is_running = False
         print("\n交易程序已停止")
-        print(f"最终统计: 总尝试{self.trade_count}次, 成功{self.successful_trades}次")
+        print("=" * 50)
+        print("最终交易统计:")
+        self.print_trading_statistics()
+        print("=" * 50)
+        print("最终账户余额:")
         self.print_account_balances()
 
 def main():
