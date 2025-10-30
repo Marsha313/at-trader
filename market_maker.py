@@ -1073,6 +1073,8 @@ class SmartMarketMaker:
         print()
         
         # 启动交易
+        print("🚀 5s后启动交易...")
+        time.sleep(5)
         self.monitor_and_trade()
     
     def stop(self):
