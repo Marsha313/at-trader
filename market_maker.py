@@ -260,6 +260,32 @@ class AsterDexClient:
         """强制刷新余额缓存"""
         self._balance_cache = None
         return self.get_account_balance(force_refresh=True)
+    
+    def get_user_trades(self, symbol: str, start_time: int = None, end_time: int = None, 
+                       limit: int = 1000, from_id: int = None) -> List[Dict]:
+        """获取账户成交历史"""
+        endpoint = "/api/v1/userTrades"
+        params = {
+            'symbol': symbol,
+            'limit': limit
+        }
+        
+        if start_time:
+            params['startTime'] = start_time
+        if end_time:
+            params['endTime'] = end_time
+        if from_id:
+            params['fromId'] = from_id
+            
+        data = self._request('GET', endpoint, params, signed=True)
+        
+        if isinstance(data, list):
+            return data
+        elif 'code' in data:
+            print(f"获取成交历史失败: {data}")
+            return []
+        else:
+            return []
 
 class SmartMarketMaker:
     def __init__(self):
@@ -312,6 +338,53 @@ class SmartMarketMaker:
         self.market_sell_success_count = 0  # 卖单市价单成功次数
         self.limit_sell_attempt_count = 0   # 卖单限价单尝试次数
         
+        # 历史交易量统计
+        self.historical_volume_account1 = 0.0
+        self.historical_volume_account2 = 0.0
+        
+    def calculate_historical_volume(self):
+        """计算历史所有AT现货交易量总和（以USDT为单位）"""
+        print("📊 正在计算历史AT现货交易量...")
+        
+        # 计算账户1的历史交易量
+        try:
+            trades_account1 = self.client1.get_user_trades(
+                symbol=self.symbol,
+                limit=1000
+            )
+            
+            for trade in trades_account1:
+                if trade.get('symbol') == self.symbol:
+                    quote_qty = float(trade.get('quoteQty', 0))
+                    self.historical_volume_account1 += quote_qty
+                    
+            print(f"账户1 {self.symbol} 历史交易量: {self.historical_volume_account1:.2f} USDT")
+            
+        except Exception as e:
+            print(f"获取账户1历史交易量失败: {e}")
+        
+        # 计算账户2的历史交易量
+        try:
+            trades_account2 = self.client2.get_user_trades(
+                symbol=self.symbol,
+                limit=1000
+            )
+            
+            for trade in trades_account2:
+                if trade.get('symbol') == self.symbol:
+                    quote_qty = float(trade.get('quoteQty', 0))
+                    self.historical_volume_account2 += quote_qty
+                    
+            print(f"账户2 {self.symbol} 历史交易量: {self.historical_volume_account2:.2f} USDT")
+            
+        except Exception as e:
+            print(f"获取账户2历史交易量失败: {e}")
+        
+        total_historical_volume = self.historical_volume_account1 + self.historical_volume_account2
+        print(f"💰 总历史AT现货交易量: {total_historical_volume:.2f} USDT")
+        
+        return total_historical_volume
+    
     def get_cached_trade_direction(self) -> Tuple[str, str]:
         """获取缓存的交易方向，如果缓存不存在则计算"""
         if self.cached_trade_direction is None:
@@ -825,6 +898,14 @@ class SmartMarketMaker:
         print(f"   卖单市价单成功次数: {self.market_sell_success_count}")
         print(f"   累计交易量: {self.total_volume:.2f}/{self.target_volume}")
     
+    def print_historical_volume_statistics(self):
+        """打印历史交易量统计"""
+        print("\n💰 历史AT现货交易量统计:")
+        print(f"   账户1 {self.symbol} 历史交易量: {self.historical_volume_account1:.2f} USDT")
+        print(f"   账户2 {self.symbol} 历史交易量: {self.historical_volume_account2:.2f} USDT")
+        total_historical_volume = self.historical_volume_account1 + self.historical_volume_account2
+        print(f"   总历史AT现货交易量: {total_historical_volume:.2f} USDT")
+    
     def print_account_balances(self):
         """打印账户余额（使用缓存数据）"""
         try:
@@ -907,6 +988,9 @@ class SmartMarketMaker:
         self.update_trade_direction_cache()
         print("✅ 缓存数据初始化完成")
         
+        # 计算历史交易量
+        self.calculate_historical_volume()
+        
         # 打印初始余额和推荐方向
         print("初始账户余额和推荐交易方向:")
         self.print_account_balances()
@@ -922,6 +1006,8 @@ class SmartMarketMaker:
         print("=" * 50)
         print("最终交易统计:")
         self.print_trading_statistics()
+        print("\n历史交易量统计:")
+        self.print_historical_volume_statistics()
         print("=" * 50)
         print("最终账户余额:")
         self.print_account_balances()
