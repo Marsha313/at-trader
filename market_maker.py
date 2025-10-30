@@ -337,6 +337,7 @@ class SmartMarketMaker:
         self.limit_sell_success_count = 0  # 卖单限价单成功次数
         self.market_sell_success_count = 0  # 卖单市价单成功次数
         self.limit_sell_attempt_count = 0   # 卖单限价单尝试次数
+        self.partial_limit_sell_count = 0   # 卖单限价单部分成交次数
         
         # 历史交易量统计
         self.historical_volume_account1 = 0.0
@@ -481,9 +482,10 @@ class SmartMarketMaker:
         
         return max(returns) if returns else 0
     
-    def get_sell_quantity(self) -> Tuple[float, str]:
+    def get_sell_quantity(self, sell_client_name: str = None) -> Tuple[float, str]:
         """获取实际可卖数量和卖出账户（使用缓存余额）"""
-        sell_client_name, _ = self.get_current_trade_direction()
+        if sell_client_name is None:
+            sell_client_name, _ = self.get_current_trade_direction()
         
         if sell_client_name == 'ACCOUNT1':
             available_at = self.client1.get_asset_balance(self.base_asset)
@@ -586,7 +588,7 @@ class SmartMarketMaker:
             buy_order_id = f"{buy_client_name.lower()}_buy_{timestamp}"
             
             # 卖单数量：实际持有量
-            sell_quantity, _ = self.get_sell_quantity()
+            sell_quantity, _ = self.get_sell_quantity(sell_client_name)
             # 买单数量：固定配置量
             buy_quantity = self.fixed_buy_quantity
             
@@ -637,6 +639,63 @@ class SmartMarketMaker:
             print(f"策略1执行出错: {e}")
             return False
     
+    def handle_partial_limit_sell(self, sell_client, sell_order_id, sell_client_name, timestamp) -> bool:
+        """处理限价卖单部分成交的情况"""
+        print("🔄 检测到限价卖单部分成交，处理剩余数量...")
+        
+        try:
+            # 强制刷新余额缓存，获取最新余额
+            sell_client.refresh_balance_cache()
+            
+            # 获取当前可卖数量
+            remaining_quantity, _ = self.get_sell_quantity(sell_client_name)
+            
+            if remaining_quantity > 0:
+                print(f"📤 剩余 {remaining_quantity:.4f} {self.base_asset} 需要市价卖出")
+                
+                # 取消剩余的限价单
+                cancel_result = sell_client.cancel_order(self.symbol, origClientOrderId=sell_order_id)
+                if 'orderId' in cancel_result:
+                    print("✅ 已取消剩余限价卖单")
+                else:
+                    print("⚠️ 取消限价卖单失败，但继续执行市价卖出")
+                
+                # 立即下市价卖单，卖出剩余的AT数量
+                emergency_sell = sell_client.create_order(
+                    symbol=self.symbol,
+                    side='SELL',
+                    order_type='MARKET',
+                    quantity=remaining_quantity,
+                    newClientOrderId=f"emergency_sell_{timestamp}"
+                )
+                
+                if 'orderId' in emergency_sell:
+                    print(f"✅ 紧急市价卖单已提交: 数量={remaining_quantity:.4f}")
+                    
+                    # 等待卖单成交
+                    time.sleep(2)
+                    
+                    # 检查卖单状态
+                    sell_status = sell_client.get_order(self.symbol, origClientOrderId=f"emergency_sell_{timestamp}")
+                    if sell_status.get('status') in ['FILLED', 'PARTIALLY_FILLED']:
+                        print("✅ 紧急市价卖单已成交")
+                        self.market_sell_success_count += 1
+                        self.partial_limit_sell_count += 1
+                        return True
+                    else:
+                        print("⚠️ 紧急市价卖单未完全成交")
+                        return False
+                else:
+                    print("❌ 紧急市价卖单失败")
+                    return False
+            else:
+                print("✅ 限价卖单已完全成交，无需额外操作")
+                return True
+                
+        except Exception as e:
+            print(f"❌ 处理部分成交时出错: {e}")
+            return False
+    
     def strategy_limit_market(self) -> bool:
         """策略2: 限价卖单 + 市价买单"""
         print("执行策略2: 限价卖单 + 市价买单")
@@ -657,7 +716,7 @@ class SmartMarketMaker:
             buy_order_id = f"{buy_client_name.lower()}_market_buy_{timestamp}"
             
             # 卖单数量：实际持有量
-            sell_quantity, _ = self.get_sell_quantity()
+            sell_quantity, _ = self.get_sell_quantity(sell_client_name)
             # 买单数量：固定配置量
             buy_quantity = self.fixed_buy_quantity
             
@@ -706,6 +765,7 @@ class SmartMarketMaker:
             buy_filled = False
             sell_filled = False
             sell_was_limit = True  # 标记卖单是否为限价单
+            sell_partial_filled = False  # 标记卖单是否部分成交
             
             while time.time() - start_time < self.order_timeout:
                 # 检查买单状态
@@ -718,18 +778,31 @@ class SmartMarketMaker:
                 # 检查卖单状态
                 if not sell_filled:
                     sell_status = sell_client.get_order(self.symbol, origClientOrderId=sell_order_id)
-                    if sell_status.get('status') in ['FILLED', 'PARTIALLY_FILLED']:
+                    sell_status_value = sell_status.get('status')
+                    
+                    if sell_status_value == 'FILLED':
                         sell_filled = True
-                        print("限价卖单已成交")
-                        # 记录限价卖单成功
-                        if sell_was_limit:
-                            self.limit_sell_success_count += 1
+                        print("限价卖单已完全成交")
+                        self.limit_sell_success_count += 1
+                    
+                    elif sell_status_value == 'PARTIALLY_FILLED':
+                        print("⚠️ 限价卖单部分成交")
+                        sell_partial_filled = True
+                        
+                        # 如果买单已成交但卖单部分成交，处理剩余数量
+                        if buy_filled:
+                            # 处理部分成交
+                            success = self.handle_partial_limit_sell(sell_client, sell_order_id, sell_client_name, timestamp)
+                            if success:
+                                sell_filled = True
+                                sell_was_limit = False  # 标记为已转为市价单
+                            break
                 
                 if buy_filled and sell_filled:
                     break
                     
                 # 如果买单成交但卖单未成交，转为市价卖出
-                if buy_filled and not sell_filled:
+                if buy_filled and not sell_filled and not sell_partial_filled:
                     print("检测到风险: 买单成交但卖单未成交，转为市价卖出")
                     sell_client.cancel_order(self.symbol, origClientOrderId=sell_order_id)
                     
@@ -737,13 +810,13 @@ class SmartMarketMaker:
                     sell_was_limit = False
                     
                     # 立即下市价卖单，卖出实际持有的AT数量
-                    emergency_sell_quantity, _ = self.get_sell_quantity()  # 重新获取当前可卖数量
+                    emergency_sell_quantity, _ = self.get_sell_quantity(sell_client_name)
                     if emergency_sell_quantity > 0:
                         emergency_sell = sell_client.create_order(
                             symbol=self.symbol,
                             side='SELL',
                             order_type='MARKET',
-                            quantity=emergency_sell_quantity,  # 卖出实际持有的数量
+                            quantity=emergency_sell_quantity,
                             newClientOrderId=f"emergency_sell_{timestamp}"
                         )
                         
@@ -766,7 +839,7 @@ class SmartMarketMaker:
             # 清理未成交订单
             if not buy_filled:
                 buy_client.cancel_order(self.symbol, origClientOrderId=buy_order_id)
-            if not sell_filled and sell_was_limit:  # 只有限价单才需要取消
+            if not sell_filled and sell_was_limit and not sell_partial_filled:
                 sell_client.cancel_order(self.symbol, origClientOrderId=sell_order_id)
             
             success = buy_filled and sell_filled
@@ -891,6 +964,7 @@ class SmartMarketMaker:
         
         print(f"   卖单限价单尝试次数: {self.limit_sell_attempt_count}")
         print(f"   卖单限价单成功次数: {self.limit_sell_success_count}")
+        print(f"   卖单限价单部分成交次数: {self.partial_limit_sell_count}")
         
         if self.limit_sell_attempt_count > 0:
             limit_sell_success_rate = (self.limit_sell_success_count / self.limit_sell_attempt_count) * 100
@@ -999,8 +1073,6 @@ class SmartMarketMaker:
         print()
         
         # 启动交易
-        print("\n5秒后开始交易...")
-        time.sleep(5)
         self.monitor_and_trade()
     
     def stop(self):
