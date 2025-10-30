@@ -37,6 +37,8 @@ class AsterDexClient:
         self.account_name = account_name
         self.base_url = os.getenv('BASE_URL', 'https://sapi.asterdex.com')
         self.symbol_precision_cache = {}
+        # 初始化余额缓存为None，表示需要首次加载
+        self._balance_cache = None
         
     def _sign_request(self, params: Dict) -> str:
         """生成签名"""
@@ -122,11 +124,6 @@ class AsterDexClient:
     def get_symbol_precision(self, symbol: str) -> Tuple[float, float]:
         """获取交易对的步长信息（从缓存中）"""
         return (0.00001, 0.00001)
-        # if symbol not in self.symbol_precision_cache:
-        #     # 如果缓存中没有，尝试预加载
-        #     self.preload_symbol_precision(symbol)
-        
-        # return self.symbol_precision_cache.get(symbol, (0.00001, 0.00001))
     
     def __get_trimmed_quantity(self, quantity: float, step_size: float) -> float:
         """格式化数量到正确的步长"""
@@ -171,13 +168,11 @@ class AsterDexClient:
         tick_size, step_size = self.get_symbol_precision(symbol)
         
         # 格式化数量
-        # formatted_quantity = self.__get_trimmed_quantity(quantity, step_size)
         formatted_quantity = round(quantity,2)
         
         # 格式化价格（如果是限价单）
         formatted_price = None
         if price is not None and order_type != 'MARKET':
-            # formatted_price = self.__get_trimmed_price(price, tick_size)
             formatted_price = round(price,5)
         
         params = {
@@ -232,8 +227,12 @@ class AsterDexClient:
             
         return self._request('GET', endpoint, params, signed=True)
     
-    def get_account_balance(self) -> Dict[str, AccountBalance]:
+    def get_account_balance(self, force_refresh: bool = False) -> Dict[str, AccountBalance]:
         """获取账户余额"""
+        # 如果缓存存在且不强制刷新，直接返回缓存数据
+        if self._balance_cache is not None and not force_refresh:
+            return self._balance_cache
+        
         endpoint = "/api/v1/account"
         data = self._request('GET', endpoint, signed=True)
         
@@ -245,14 +244,22 @@ class AsterDexClient:
                     free=float(balance.get('free', 0)),
                     locked=float(balance.get('locked', 0))
                 )
+        
+        # 更新缓存
+        self._balance_cache = balances
         return balances
     
-    def get_asset_balance(self, asset: str) -> float:
+    def get_asset_balance(self, asset: str, force_refresh: bool = False) -> float:
         """获取指定资产的可用余额"""
-        balances = self.get_account_balance()
+        balances = self.get_account_balance(force_refresh)
         if asset in balances:
             return balances[asset].free
         return 0.0
+    
+    def refresh_balance_cache(self):
+        """强制刷新余额缓存"""
+        self._balance_cache = None
+        return self.get_account_balance(force_refresh=True)
 
 class SmartMarketMaker:
     def __init__(self):
@@ -288,7 +295,10 @@ class SmartMarketMaker:
         # 预加载交易对精度信息
         self.preload_precision_info()
         
-        # 移除固定交易方向配置，改为动态判断
+        # 缓存数据 - 初始化为None，表示需要首次计算
+        self.cached_trade_direction = None
+        
+        # 交易状态
         self.total_volume = 0
         self.is_running = False
         self.order_book = OrderBook(bids=[], asks=[], update_time=0)
@@ -299,8 +309,20 @@ class SmartMarketMaker:
         self.trade_count = 0
         self.successful_trades = 0
         
+    def get_cached_trade_direction(self) -> Tuple[str, str]:
+        """获取缓存的交易方向，如果缓存不存在则计算"""
+        if self.cached_trade_direction is None:
+            self.cached_trade_direction = self.determine_trade_direction()
+        
+        return self.cached_trade_direction
+    
+    def update_trade_direction_cache(self):
+        """强制更新交易方向缓存"""
+        self.cached_trade_direction = self.determine_trade_direction()
+    
     def determine_trade_direction(self) -> Tuple[str, str]:
         """自动判断交易方向：返回 (sell_client_name, buy_client_name)"""
+        # 使用缓存的余额数据
         at_balance1 = self.client1.get_asset_balance(self.base_asset)
         at_balance2 = self.client2.get_asset_balance(self.base_asset)
         
@@ -314,8 +336,8 @@ class SmartMarketMaker:
             return 'ACCOUNT2', 'ACCOUNT1'
     
     def get_current_trade_direction(self) -> Tuple[str, str]:
-        """获取当前交易方向"""
-        return self.determine_trade_direction()
+        """获取当前交易方向（使用缓存）"""
+        return self.get_cached_trade_direction()
     
     def preload_precision_info(self):
         """预加载所有需要的交易对精度信息"""
@@ -383,7 +405,7 @@ class SmartMarketMaker:
         return max(returns) if returns else 0
     
     def get_sell_quantity(self) -> Tuple[float, str]:
-        """获取实际可卖数量和卖出账户"""
+        """获取实际可卖数量和卖出账户（使用缓存余额）"""
         sell_client_name, _ = self.get_current_trade_direction()
         
         if sell_client_name == 'ACCOUNT1':
@@ -396,7 +418,7 @@ class SmartMarketMaker:
         return available_at, sell_account
     
     def check_buy_conditions(self) -> bool:
-        """检查买单条件：USDT余额是否足够"""
+        """检查买单条件：USDT余额是否足够（使用缓存余额）"""
         _, buy_client_name = self.get_current_trade_direction()
         
         if buy_client_name == 'ACCOUNT1':
@@ -475,7 +497,7 @@ class SmartMarketMaker:
         try:
             timestamp = int(time.time() * 1000)
             
-            # 动态获取交易方向
+            # 动态获取交易方向（使用缓存）
             sell_client_name, buy_client_name = self.get_current_trade_direction()
             
             # 确定买卖客户端
@@ -527,6 +549,10 @@ class SmartMarketMaker:
                 (buy_client, buy_order_id)
             ])
             
+            # 交易成功后更新缓存
+            if success:
+                self.update_cache_after_trade()
+            
             return success
             
         except Exception as e:
@@ -541,7 +567,7 @@ class SmartMarketMaker:
             bid, ask, _, _ = self.get_best_bid_ask()
             timestamp = int(time.time() * 1000)
             
-            # 动态获取交易方向
+            # 动态获取交易方向（使用缓存）
             sell_client_name, buy_client_name = self.get_current_trade_direction()
             
             # 确定买卖客户端
@@ -577,9 +603,6 @@ class SmartMarketMaker:
                 return False
             
             print(f"限价卖单已挂出: 价格={sell_price:.6f}, 数量={sell_quantity:.4f}, 订单ID={sell_order_id}")
-            
-            # 等待一下让卖单进入订单簿
-            # time.sleep(0.05)
             
             # 下市价买单（固定配置量）
             buy_order = buy_client.create_order(
@@ -657,6 +680,11 @@ class SmartMarketMaker:
                 sell_client.cancel_order(self.symbol, origClientOrderId=sell_order_id)
             
             success = buy_filled and sell_filled
+            
+            # 交易成功后更新缓存
+            if success:
+                self.update_cache_after_trade()
+            
             return success
             
         except Exception as e:
@@ -700,6 +728,32 @@ class SmartMarketMaker:
         
         return False
     
+    def update_cache_after_trade(self):
+        """交易成功后更新缓存数据"""
+        print("🔄 交易成功，更新缓存数据...")
+        
+        # 强制刷新余额缓存
+        self.client1.refresh_balance_cache()
+        self.client2.refresh_balance_cache()
+        
+        # 更新交易方向缓存
+        self.update_trade_direction_cache()
+        
+        print("✅ 缓存数据已更新")
+    
+    def update_cache_after_failure(self):
+        """交易失败后更新缓存数据"""
+        print("🔄 交易失败，更新缓存数据...")
+        
+        # 强制刷新余额缓存
+        self.client1.refresh_balance_cache()
+        self.client2.refresh_balance_cache()
+        
+        # 更新交易方向缓存
+        self.update_trade_direction_cache()
+        
+        print("✅ 缓存数据已更新")
+    
     def execute_trading_cycle(self) -> bool:
         """执行一个交易周期"""
         if not self.check_market_conditions():
@@ -730,20 +784,20 @@ class SmartMarketMaker:
             print(f"  本次交易量: {trade_volume:.4f}, 累计: {self.total_volume:.2f}/{self.target_volume}")
         else:
             print("✗ 交易失败")
+            # 交易失败后也更新缓存
+            self.update_cache_after_failure()
         
         return success
     
     def print_account_balances(self):
-        """打印账户余额"""
+        """打印账户余额（使用缓存数据）"""
         try:
-            balances1 = self.client1.get_account_balance()
-            balances2 = self.client2.get_account_balance()
+            # 使用缓存数据获取余额
+            at_balance1 = self.client1.get_asset_balance(self.base_asset)
+            usdt_balance1 = self.client1.get_asset_balance(self.quote_asset)
             
-            at_balance1 = balances1.get(self.base_asset, AccountBalance(0, 0)).free
-            usdt_balance1 = balances1.get(self.quote_asset, AccountBalance(0, 0)).free
-            
-            at_balance2 = balances2.get(self.base_asset, AccountBalance(0, 0)).free
-            usdt_balance2 = balances2.get(self.quote_asset, AccountBalance(0, 0)).free
+            at_balance2 = self.client2.get_asset_balance(self.base_asset)
+            usdt_balance2 = self.client2.get_asset_balance(self.quote_asset)
             
             print(f"账户1: {self.base_asset}={at_balance1:.4f}, {self.quote_asset}={usdt_balance1:.2f}")
             print(f"账户2: {self.base_asset}={at_balance2:.4f}, {self.quote_asset}={usdt_balance2:.2f}")
@@ -808,6 +862,13 @@ class SmartMarketMaker:
         print(f"价差阈值: {self.max_spread:.2%}")
         print(f"波动阈值: {self.max_price_change:.2%}")
         print("=" * 60)
+        
+        # 初始化缓存
+        print("🔄 初始化缓存数据...")
+        self.client1.refresh_balance_cache()
+        self.client2.refresh_balance_cache()
+        self.update_trade_direction_cache()
+        print("✅ 缓存数据初始化完成")
         
         # 打印初始余额和推荐方向
         print("初始账户余额和推荐交易方向:")
