@@ -482,12 +482,12 @@ class SmartMarketMaker:
         self.logger.info(f"检查AT余额: 账户1={at_balance1:.4f}, 账户2={at_balance2:.4f}")
         
         # 如果两个账号都有AT或者都有USDT不足，不需要初始化
-        if at_balance1 > 0 and at_balance2 > 0:
+        if at_balance1 > 1 and at_balance2 > 1:
             self.logger.info("✅ 两个账户都有AT余额，无需初始化")
             return True
         
         # 如果两个账号都没有AT，选择一个账号买入
-        if at_balance1 <= 0 and at_balance2 <= 0:
+        if at_balance1 <= 1 and at_balance2 <= 1:
             self.logger.info("🔄 两个账户都没有AT余额，开始初始化...")
             
             # 选择USDT余额较多的账号进行买入
