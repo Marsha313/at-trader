@@ -1292,6 +1292,8 @@ class SmartMarketMaker:
         self.update_trade_direction_cache()
         self.logger.info("✅ 缓存数据初始化完成")
 
+        self.update_order_book()
+        
         # 检查并初始化AT余额
         self.logger.info("\n🔍 检查AT余额状态...")
         if not self.initialize_at_balance():
