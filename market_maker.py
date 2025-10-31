@@ -3,6 +3,7 @@ import time
 import hmac
 import hashlib
 import urllib.parse
+import math
 from typing import Dict, List, Optional, Tuple
 import json
 import threading
@@ -178,7 +179,7 @@ class AsterDexClient:
         endpoint = "/api/v1/order"
         
         # 格式化数量
-        formatted_quantity = (quantity // 0.01 )* 0.01
+        formatted_quantity = math.floor(quantity / 0.01 )* 0.01
         
         # 格式化价格（如果是限价单）
         formatted_price = None
