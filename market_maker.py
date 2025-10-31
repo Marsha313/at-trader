@@ -783,28 +783,32 @@ class SmartMarketMaker:
             self.logger.error(f"策略1执行出错: {e}")
             return False
     
-    def handle_partial_limit_sell(self, sell_client, sell_order_id, sell_client_name, timestamp) -> bool:
+    def handle_partial_limit_sell(self, sell_client:AsterDexClient, sell_order_id, sell_client_name, timestamp) -> bool:
         """处理限价卖单部分成交的情况"""
         self.logger.info("🔄 检测到限价卖单部分成交，处理剩余数量...")
         
         try:
-            # 强制刷新余额缓存，获取最新余额
+            # 首先取消剩余的限价单
+            cancel_result = sell_client.cancel_order(self.symbol, origClientOrderId=sell_order_id)
+            if 'orderId' in cancel_result:
+                self.logger.info("✅ 已取消剩余限价卖单")
+            else:
+                self.logger.warning("⚠️ 取消限价卖单失败，但继续执行市价卖出")
+            
+            # 强制刷新余额缓存，获取最新余额（包括已成交部分）
             sell_client.refresh_balance_cache()
             
-            # 获取当前可卖数量
-            remaining_quantity, _ = self.get_sell_quantity(sell_client_name)
-            
+            # 获取当前实际剩余可卖数量
+            if sell_client_name == 'ACCOUNT1':
+                remaining_quantity = self.client1.get_asset_balance(self.base_asset)
+            else:
+                remaining_quantity = self.client2.get_asset_balance(self.base_asset)
+            self.logger.info(f"📤 限价卖单部分成交 剩余 {remaining_quantity:.4f} {self.base_asset} ")
+
             if remaining_quantity > 0:
                 self.logger.info(f"📤 剩余 {remaining_quantity:.4f} {self.base_asset} 需要市价卖出")
                 
-                # 取消剩余的限价单
-                cancel_result = sell_client.cancel_order(self.symbol, origClientOrderId=sell_order_id)
-                if 'orderId' in cancel_result:
-                    self.logger.info("✅ 已取消剩余限价卖单")
-                else:
-                    self.logger.warning("⚠️ 取消限价卖单失败，但继续执行市价卖出")
-                
-                # 立即下市价卖单，卖出剩余的AT数量
+                # 立即下市价卖单，卖出剩余的全部AT数量
                 emergency_sell = sell_client.create_order(
                     symbol=self.symbol,
                     side='SELL',
@@ -823,6 +827,8 @@ class SmartMarketMaker:
                     sell_status = sell_client.get_order(self.symbol, origClientOrderId=f"emergency_sell_{timestamp}")
                     if sell_status.get('status') in ['FILLED', 'PARTIALLY_FILLED']:
                         self.logger.info("✅ 紧急市价卖单已成交")
+                        # 强制刷新余额缓存，确保数据最新
+                        sell_client.refresh_balance_cache()
                         self.market_sell_success_count += 1
                         self.partial_limit_sell_count += 1
                         return True
