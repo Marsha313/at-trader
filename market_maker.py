@@ -282,7 +282,7 @@ class AsterDexClient:
         """获取指定资产的可用余额"""
         balances = self.get_account_balance(force_refresh)
         if asset in balances:
-            return balances[asset].free
+            return balances[asset].free + balances[asset].lock
         return 0.0
     
     def refresh_balance_cache(self):
