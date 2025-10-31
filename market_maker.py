@@ -294,26 +294,27 @@ class AsterDexClient:
         """获取所有账户成交历史（分页获取所有记录）"""
         all_trades = []
         limit = 1000  # 每次获取的最大记录数
-        from_id = None
+        from_id = 1  # 从最小的ID开始获取
+        max_attempts = 1000  # 最大尝试次数，防止无限循环
+        attempt_count = 0
         
-        self.logger.info(f"开始获取 {symbol} 的所有成交历史...")
+        self.logger.info(f"开始获取 {symbol} 的所有成交历史，从ID=1开始...")
         
-        while True:
+        while attempt_count < max_attempts:
+            attempt_count += 1
             try:
                 params = {
                     'symbol': symbol,
-                    'limit': limit
+                    'limit': limit,
+                    'fromId': from_id
                 }
-                
-                if from_id:
-                    params['fromId'] = from_id
                 
                 if start_time:
                     params['startTime'] = start_time
                 if end_time:
                     params['endTime'] = end_time
                 
-                self.logger.info(f"获取成交历史: fromId={from_id}, limit={limit}")
+                self.logger.info(f"获取成交历史: fromId={from_id}, limit={limit}, 第{attempt_count}次尝试")
                 
                 endpoint = "/api/v1/userTrades"
                 data = self._request('GET', endpoint, params, signed=True)
@@ -328,6 +329,11 @@ class AsterDexClient:
                 
                 # 过滤指定交易对的记录
                 filtered_trades = [trade for trade in data if trade.get('symbol') == symbol]
+                
+                if not filtered_trades:
+                    self.logger.info("没有找到指定交易对的成交记录")
+                    break
+                
                 all_trades.extend(filtered_trades)
                 
                 self.logger.info(f"本次获取 {len(filtered_trades)} 条记录，累计 {len(all_trades)} 条记录")
@@ -337,9 +343,9 @@ class AsterDexClient:
                     self.logger.info("已获取所有成交记录")
                     break
                 
-                # 设置下一次查询的起始ID（使用最小的trade ID）
-                min_trade_id = min(int(trade['id']) for trade in data)
-                from_id = min_trade_id - 1  # 获取更早的记录
+                # 设置下一次查询的起始ID（使用最大的trade ID + 1）
+                max_trade_id = max(int(trade['id']) for trade in filtered_trades)
+                from_id = max_trade_id + 1  # 获取更大的ID的记录
                 
                 # 避免频繁请求
                 time.sleep(0.1)
@@ -347,6 +353,9 @@ class AsterDexClient:
             except Exception as e:
                 self.logger.error(f"获取成交历史时出错: {e}")
                 break
+        
+        if attempt_count >= max_attempts:
+            self.logger.warning(f"达到最大尝试次数 {max_attempts}，停止获取")
         
         self.logger.info(f"总共获取到 {len(all_trades)} 条 {symbol} 的成交记录")
         return all_trades
