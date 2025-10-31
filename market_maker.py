@@ -154,22 +154,6 @@ class AsterDexClient:
         """获取交易对的步长信息（从缓存中）"""
         return (0.00001, 0.00001)
     
-    def __get_trimmed_quantity(self, quantity: float, step_size: float) -> float:
-        """格式化数量到正确的步长"""
-        if step_size <= 0:
-            return quantity
-            
-        trimmed_quantity = (quantity // step_size) * step_size
-        return trimmed_quantity
-    
-    def __get_trimmed_price(self, price: float, tick_size: float) -> float:
-        """格式化价格到正确的步长"""
-        if tick_size <= 0:
-            return price
-            
-        trimmed_price = round(price / tick_size) * tick_size
-        return trimmed_price
-    
     def get_order_book(self, symbol: str, limit: int = 10) -> OrderBook:
         """获取订单簿"""
         endpoint = "/api/v1/depth"
@@ -193,11 +177,8 @@ class AsterDexClient:
         """创建订单 - 使用缓存的精度信息"""
         endpoint = "/api/v1/order"
         
-        # 从缓存获取步长信息
-        tick_size, step_size = self.get_symbol_precision(symbol)
-        
         # 格式化数量
-        formatted_quantity = round(quantity,2)
+        formatted_quantity = (quantity // 0.01 )* 0.01
         
         # 格式化价格（如果是限价单）
         formatted_price = None
