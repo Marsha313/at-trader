@@ -159,7 +159,7 @@ class AsterDexClient:
         if step_size <= 0:
             return quantity
             
-        trimmed_quantity = round(quantity / step_size) * step_size
+        trimmed_quantity = (quantity // step_size) * step_size
         return trimmed_quantity
     
     def __get_trimmed_price(self, price: float, tick_size: float) -> float:
