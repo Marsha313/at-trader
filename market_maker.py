@@ -600,6 +600,42 @@ class SmartMarketMaker:
             sell_account = 'ACCOUNT2'
         
         return available_at, sell_account
+
+    def check_buy_conditions_with_retry(self, max_retry: int = 3, wait_time: int = 20) -> bool:
+        """检查买单条件，余额不足时等待并重试"""
+        for attempt in range(max_retry):
+            if self.check_buy_conditions():
+                return True
+            else:
+                if attempt < max_retry - 1:  # 不是最后一次尝试
+                    self.logger.info(f"USDT余额不足，等待{wait_time}秒后重试... (尝试 {attempt + 1}/{max_retry})")
+                    
+                    # 强制刷新余额缓存
+                    self.client1.refresh_balance_cache()
+                    self.client2.refresh_balance_cache()
+                    self.update_trade_direction_cache()
+                    
+                    time.sleep(wait_time)
+        
+        return False
+
+    def check_sell_conditions_with_retry(self, max_retry: int = 3, wait_time: int = 20) -> bool:
+        """检查卖单条件，余额不足时等待并重试"""
+        for attempt in range(max_retry):
+            if self.check_sell_conditions():
+                return True
+            else:
+                if attempt < max_retry - 1:  # 不是最后一次尝试
+                    self.logger.info(f"AT余额不足，等待{wait_time}秒后重试... (尝试 {attempt + 1}/{max_retry})")
+                    
+                    # 强制刷新余额缓存
+                    self.client1.refresh_balance_cache()
+                    self.client2.refresh_balance_cache()
+                    self.update_trade_direction_cache()
+                    
+                    time.sleep(wait_time)
+        
+        return False
     
     def check_buy_conditions(self) -> bool:
         """检查买单条件：USDT余额是否足够（使用缓存余额）"""
@@ -635,15 +671,18 @@ class SmartMarketMaker:
         return True
     
     def check_market_conditions(self) -> bool:
-        """检查市场条件是否满足交易"""
-        # 检查卖单条件（只要有AT可卖就行）
-        if not self.check_sell_conditions():
+        """检查市场条件是否满足交易（包含余额不足重试机制）"""
+        # 检查卖单条件（使用重试机制）
+        if not self.check_sell_conditions_with_retry(max_retry=3, wait_time=20):
+            self.logger.error("卖单条件检查失败，AT余额持续不足")
             return False
         
-        # 检查买单条件
-        if not self.check_buy_conditions():
+        # 检查买单条件（使用重试机制）
+        if not self.check_buy_conditions_with_retry(max_retry=3, wait_time=20):
+            self.logger.error("买单条件检查失败，USDT余额持续不足")
             return False
         
+        # 原有的市场条件检查
         bid, ask, bid_qty, ask_qty = self.get_best_bid_ask()
         
         if bid == 0 or ask == 0:
