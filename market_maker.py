@@ -179,7 +179,7 @@ class AsterDexClient:
         endpoint = "/api/v1/order"
         
         # 格式化数量
-        formatted_quantity = math.floor(quantity / 0.01 )* 0.01
+        formatted_quantity = round(math.floor(quantity / 0.01 )* 0.01,2)
         
         # 格式化价格（如果是限价单）
         formatted_price = None
