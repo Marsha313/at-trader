@@ -290,31 +290,94 @@ class AsterDexClient:
         self._balance_cache = None
         return self.get_account_balance(force_refresh=True)
     
+    def get_all_user_trades(self, symbol: str, start_time: int = None, end_time: int = None) -> List[Dict]:
+        """获取所有账户成交历史（分页获取所有记录）"""
+        all_trades = []
+        limit = 1000  # 每次获取的最大记录数
+        from_id = None
+        
+        self.logger.info(f"开始获取 {symbol} 的所有成交历史...")
+        
+        while True:
+            try:
+                params = {
+                    'symbol': symbol,
+                    'limit': limit
+                }
+                
+                if from_id:
+                    params['fromId'] = from_id
+                
+                if start_time:
+                    params['startTime'] = start_time
+                if end_time:
+                    params['endTime'] = end_time
+                
+                self.logger.info(f"获取成交历史: fromId={from_id}, limit={limit}")
+                
+                endpoint = "/api/v1/userTrades"
+                data = self._request('GET', endpoint, params, signed=True)
+                
+                if not isinstance(data, list):
+                    self.logger.error(f"获取成交历史失败: {data}")
+                    break
+                
+                if not data:
+                    self.logger.info("没有更多成交记录了")
+                    break
+                
+                # 过滤指定交易对的记录
+                filtered_trades = [trade for trade in data if trade.get('symbol') == symbol]
+                all_trades.extend(filtered_trades)
+                
+                self.logger.info(f"本次获取 {len(filtered_trades)} 条记录，累计 {len(all_trades)} 条记录")
+                
+                # 如果返回的记录数少于limit，说明已经获取完所有记录
+                if len(data) < limit:
+                    self.logger.info("已获取所有成交记录")
+                    break
+                
+                # 设置下一次查询的起始ID（使用最小的trade ID）
+                min_trade_id = min(int(trade['id']) for trade in data)
+                from_id = min_trade_id - 1  # 获取更早的记录
+                
+                # 避免频繁请求
+                time.sleep(0.1)
+                
+            except Exception as e:
+                self.logger.error(f"获取成交历史时出错: {e}")
+                break
+        
+        self.logger.info(f"总共获取到 {len(all_trades)} 条 {symbol} 的成交记录")
+        return all_trades
+    
     def get_user_trades(self, symbol: str, start_time: int = None, end_time: int = None, 
                        limit: int = 1000, from_id: int = None) -> List[Dict]:
-        """获取账户成交历史"""
-        endpoint = "/api/v1/userTrades"
-        params = {
-            'symbol': symbol,
-            'limit': limit
-        }
-        
-        if start_time:
-            params['startTime'] = start_time
-        if end_time:
-            params['endTime'] = end_time
-        if from_id:
-            params['fromId'] = from_id
+        """获取账户成交历史（兼容旧接口）"""
+        # 如果指定了limit，使用原来的逻辑
+        if limit and limit <= 1000:
+            params = {
+                'symbol': symbol,
+                'limit': limit
+            }
             
-        data = self._request('GET', endpoint, params, signed=True)
-        
-        if isinstance(data, list):
-            return data
-        elif 'code' in data:
-            self.logger.error(f"获取成交历史失败: {data}")
-            return []
+            if start_time:
+                params['startTime'] = start_time
+            if end_time:
+                params['endTime'] = end_time
+            if from_id:
+                params['fromId'] = from_id
+                
+            data = self._request('GET', "/api/v1/userTrades", params, signed=True)
+            
+            if isinstance(data, list):
+                return [trade for trade in data if trade.get('symbol') == symbol]
+            else:
+                self.logger.error(f"获取成交历史失败: {data}")
+                return []
         else:
-            return []
+            # 如果需要获取所有记录，使用新的分页方法
+            return self.get_all_user_trades(symbol, start_time, end_time)
 
 class SmartMarketMaker:
     def __init__(self):
@@ -375,6 +438,8 @@ class SmartMarketMaker:
         self.historical_volume_account1 = 0.0
         self.historical_volume_account2 = 0.0
         self.total_historical_volume = 0.0
+        self.historical_trade_count_account1 = 0
+        self.historical_trade_count_account2 = 0
         
     def calculate_historical_volume(self):
         """计算历史所有AT现货交易量总和（以USDT为单位）"""
@@ -382,40 +447,39 @@ class SmartMarketMaker:
         
         # 计算账户1的历史交易量
         try:
-            trades_account1 = self.client1.get_user_trades(
-                symbol=self.symbol,
-                limit=1000
-            )
+            self.logger.info("获取账户1的所有成交历史...")
+            trades_account1 = self.client1.get_all_user_trades(symbol=self.symbol)
             
             for trade in trades_account1:
                 if trade.get('symbol') == self.symbol:
                     quote_qty = float(trade.get('quoteQty', 0))
                     self.historical_volume_account1 += quote_qty
+                    self.historical_trade_count_account1 += 1
                     
-            self.logger.info(f"✅ 账户1 {self.symbol} 历史交易量: {self.historical_volume_account1:.2f} USDT")
+            self.logger.info(f"✅ 账户1 {self.symbol} 历史交易: {self.historical_trade_count_account1} 笔, 交易量: {self.historical_volume_account1:.2f} USDT")
             
         except Exception as e:
             self.logger.error(f"❌ 获取账户1历史交易量失败: {e}")
         
         # 计算账户2的历史交易量
         try:
-            trades_account2 = self.client2.get_user_trades(
-                symbol=self.symbol,
-                limit=1000
-            )
+            self.logger.info("获取账户2的所有成交历史...")
+            trades_account2 = self.client2.get_all_user_trades(symbol=self.symbol)
             
             for trade in trades_account2:
                 if trade.get('symbol') == self.symbol:
                     quote_qty = float(trade.get('quoteQty', 0))
                     self.historical_volume_account2 += quote_qty
+                    self.historical_trade_count_account2 += 1
                     
-            self.logger.info(f"✅ 账户2 {self.symbol} 历史交易量: {self.historical_volume_account2:.2f} USDT")
+            self.logger.info(f"✅ 账户2 {self.symbol} 历史交易: {self.historical_trade_count_account2} 笔, 交易量: {self.historical_volume_account2:.2f} USDT")
             
         except Exception as e:
             self.logger.error(f"❌ 获取账户2历史交易量失败: {e}")
         
         self.total_historical_volume = self.historical_volume_account1 + self.historical_volume_account2
-        self.logger.info(f"💰 总历史AT现货交易量: {self.total_historical_volume:.2f} USDT")
+        total_trade_count = self.historical_trade_count_account1 + self.historical_trade_count_account2
+        self.logger.info(f"💰 总历史AT现货交易: {total_trade_count} 笔, 交易量: {self.total_historical_volume:.2f} USDT")
         
         return self.total_historical_volume
     
@@ -1008,10 +1072,11 @@ class SmartMarketMaker:
     def print_historical_volume_statistics(self):
         """打印历史交易量统计"""
         self.logger.info("\n💰 历史AT现货交易量统计:")
-        self.logger.info(f"   账户1 {self.symbol} 历史交易量: {self.historical_volume_account1:.2f} USDT")
-        self.logger.info(f"   账户2 {self.symbol} 历史交易量: {self.historical_volume_account2:.2f} USDT")
+        self.logger.info(f"   账户1 {self.symbol} 历史交易: {self.historical_trade_count_account1} 笔, 交易量: {self.historical_volume_account1:.2f} USDT")
+        self.logger.info(f"   账户2 {self.symbol} 历史交易: {self.historical_trade_count_account2} 笔, 交易量: {self.historical_volume_account2:.2f} USDT")
+        total_trade_count = self.historical_trade_count_account1 + self.historical_trade_count_account2
         total_historical_volume = self.historical_volume_account1 + self.historical_volume_account2
-        self.logger.info(f"   总历史AT现货交易量: {total_historical_volume:.2f} USDT")
+        self.logger.info(f"   总历史AT现货交易: {total_trade_count} 笔, 交易量: {total_historical_volume:.2f} USDT")
     
     def print_account_balances(self):
         """打印账户余额（使用缓存数据）"""
