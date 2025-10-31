@@ -492,6 +492,89 @@ class SmartMarketMaker:
         
         return self.total_historical_volume
     
+    def initialize_at_balance(self) -> bool:
+        """初始化AT余额：如果两个账号都没有AT，让其中一个账号市价买入"""
+        at_balance1 = self.client1.get_asset_balance(self.base_asset)
+        at_balance2 = self.client2.get_asset_balance(self.base_asset)
+        
+        self.logger.info(f"检查AT余额: 账户1={at_balance1:.4f}, 账户2={at_balance2:.4f}")
+        
+        # 如果两个账号都有AT或者都有USDT不足，不需要初始化
+        if at_balance1 > 0 and at_balance2 > 0:
+            self.logger.info("✅ 两个账户都有AT余额，无需初始化")
+            return True
+        
+        # 如果两个账号都没有AT，选择一个账号买入
+        if at_balance1 <= 0 and at_balance2 <= 0:
+            self.logger.info("🔄 两个账户都没有AT余额，开始初始化...")
+            
+            # 选择USDT余额较多的账号进行买入
+            usdt_balance1 = self.client1.get_asset_balance(self.quote_asset)
+            usdt_balance2 = self.client2.get_asset_balance(self.quote_asset)
+            
+            if usdt_balance1 >= usdt_balance2 and usdt_balance1 > 0:
+                # 账户1买入
+                buy_client = self.client1
+                buy_client_name = 'ACCOUNT1'
+                available_usdt = usdt_balance1
+            elif usdt_balance2 > 0:
+                # 账户2买入
+                buy_client = self.client2
+                buy_client_name = 'ACCOUNT2'
+                available_usdt = usdt_balance2
+            else:
+                self.logger.error("❌ 两个账户都没有足够的USDT进行初始化买入")
+                return False
+            
+            # 计算可买入的AT数量（使用可用USDT的一半，避免全部用完）
+            bid, ask, _, _ = self.get_best_bid_ask()
+            if bid == 0 or ask == 0:
+                self.logger.error("❌ 无法获取市场价格，初始化失败")
+                return False
+            
+            current_price = (bid + ask) / 2
+            buy_quantity = min(self.fixed_buy_quantity, (available_usdt * 0.5) / current_price)
+            
+            if buy_quantity <= 0:
+                self.logger.error("❌ 计算出的买入数量为0，初始化失败")
+                return False
+            
+            self.logger.info(f"🎯 选择 {buy_client_name} 进行初始化买入: 数量={buy_quantity:.4f}, 价格≈{current_price:.4f}")
+            
+            # 执行市价买入
+            timestamp = int(time.time() * 1000)
+            buy_order_id = f"{buy_client_name.lower()}_init_buy_{timestamp}"
+            
+            buy_order = buy_client.create_order(
+                symbol=self.symbol,
+                side='BUY',
+                order_type='MARKET',
+                quantity=buy_quantity,
+                newClientOrderId=buy_order_id
+            )
+            
+            if 'orderId' not in buy_order:
+                self.logger.error(f"❌ 初始化买入失败: {buy_order}")
+                return False
+            
+            self.logger.info(f"✅ 初始化买入订单已提交: {buy_order_id}")
+            
+            # 等待订单成交
+            success = self.wait_for_orders_completion([(buy_client, buy_order_id)])
+            
+            if success:
+                self.logger.info("✅ AT余额初始化成功")
+                # 刷新余额缓存
+                self.client1.refresh_balance_cache()
+                self.client2.refresh_balance_cache()
+                return True
+            else:
+                self.logger.error("❌ 初始化买入订单未成交")
+                return False
+        
+        self.logger.info("✅ AT余额状态正常，无需初始化")
+        return True
+    
     def get_cached_trade_direction(self) -> Tuple[str, str]:
         """获取缓存的交易方向，如果缓存不存在则计算"""
         if self.cached_trade_direction is None:
@@ -672,6 +755,19 @@ class SmartMarketMaker:
     
     def check_market_conditions(self) -> bool:
         """检查市场条件是否满足交易（包含余额不足重试机制）"""
+        """检查市场条件是否满足交易（包含余额不足重试机制）"""
+        # 检查AT余额状态，如果两个账号都没有AT，先初始化
+        at_balance1 = self.client1.get_asset_balance(self.base_asset)
+        at_balance2 = self.client2.get_asset_balance(self.base_asset)
+        
+        if at_balance1 <= 0 and at_balance2 <= 0:
+            self.logger.warning("⚠️ 两个账户都没有AT余额，尝试初始化...")
+            if self.initialize_at_balance():
+                self.logger.info("✅ AT余额初始化成功，继续交易")
+            else:
+                self.logger.error("❌ AT余额初始化失败，暂停交易")
+                return False
+            
         # 检查卖单条件（使用重试机制）
         if not self.check_sell_conditions_with_retry(max_retry=3, wait_time=20):
             self.logger.error("卖单条件检查失败，AT余额持续不足")
@@ -1213,6 +1309,12 @@ class SmartMarketMaker:
         self.client2.refresh_balance_cache()
         self.update_trade_direction_cache()
         self.logger.info("✅ 缓存数据初始化完成")
+
+        # 检查并初始化AT余额
+        self.logger.info("\n🔍 检查AT余额状态...")
+        if not self.initialize_at_balance():
+            self.logger.error("❌ AT余额初始化失败，程序退出")
+            return
         
         # 计算历史交易量
         self.logger.info("\n📊 开始统计历史AT现货交易量...")
