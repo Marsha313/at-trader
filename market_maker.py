@@ -1179,6 +1179,8 @@ class SmartMarketMaker:
         self.logger.info("")
         
         # 启动交易
+        self.logger.info("\n5s后开始交易...")
+        time.sleep(5)
         self.monitor_and_trade()
     
     def stop(self):
