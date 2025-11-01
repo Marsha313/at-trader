@@ -375,7 +375,7 @@ class SmartMarketMaker:
         self.symbol = os.getenv('SYMBOL', 'ATUSDT')
         self.base_asset = self.symbol.replace('USDT', '')
         self.quote_asset = 'USDT'
-        self.quote_asset = 'ASTER'
+        self.aster_asset = 'ASTER'
         
         self.max_spread = float(os.getenv('MAX_SPREAD', 0.002))
         self.max_price_change = float(os.getenv('MAX_PRICE_CHANGE', 0.005))
