@@ -296,7 +296,7 @@ class AsterDexClient:
                 if end_time:
                     params['endTime'] = end_time
                 
-                self.logger.info(f"获取成交历史: fromId={from_id}, limit={limit}, 第{attempt_count}次尝试")
+                # self.logger.info(f"获取成交历史: fromId={from_id}, limit={limit}, 第{attempt_count}次尝试")
                 
                 endpoint = "/api/v1/userTrades"
                 data = self._request('GET', endpoint, params, signed=True)
@@ -318,7 +318,7 @@ class AsterDexClient:
                 
                 all_trades.extend(filtered_trades)
                 
-                self.logger.info(f"本次获取 {len(filtered_trades)} 条记录，累计 {len(all_trades)} 条记录")
+                # self.logger.info(f"本次获取 {len(filtered_trades)} 条记录，累计 {len(all_trades)} 条记录")
                 
                 # 如果返回的记录数少于limit，说明已经获取完所有记录
                 if len(data) < limit:
@@ -1223,8 +1223,8 @@ class SmartMarketMaker:
             usdt_balance2 = self.client2.get_asset_balance(self.quote_asset)
             aster_balance2 = self.client2.get_asset_balance(self.aster_asset)
             
-            self.logger.info(f"账户1: {self.base_asset}={at_balance1:.4f}, {self.quote_asset}={usdt_balance1:.2f}")
-            self.logger.info(f"账户2: {self.base_asset}={at_balance2:.4f}, {self.quote_asset}={usdt_balance2:.2f}")
+            self.logger.info(f"账户1: {self.base_asset}={at_balance1:.4f}, {self.quote_asset}={usdt_balance1:.2f}, {self.aster_asset}={aster_balance1:.2f}")
+            self.logger.info(f"账户2: {self.base_asset}={at_balance2:.4f}, {self.quote_asset}={usdt_balance2:.2f}, {self.aster_asset}={aster_balance2:.2f}")
             
             # 显示当前推荐交易方向
             sell_account, buy_account = self.get_current_trade_direction()
