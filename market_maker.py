@@ -375,6 +375,7 @@ class SmartMarketMaker:
         self.symbol = os.getenv('SYMBOL', 'ATUSDT')
         self.base_asset = self.symbol.replace('USDT', '')
         self.quote_asset = 'USDT'
+        self.quote_asset = 'ASTER'
         
         self.max_spread = float(os.getenv('MAX_SPREAD', 0.002))
         self.max_price_change = float(os.getenv('MAX_PRICE_CHANGE', 0.005))
@@ -1216,9 +1217,11 @@ class SmartMarketMaker:
             # 使用缓存数据获取余额
             at_balance1 = self.client1.get_asset_balance(self.base_asset)
             usdt_balance1 = self.client1.get_asset_balance(self.quote_asset)
+            aster_balance1 = self.client1.get_asset_balance(self.aster_asset)
             
             at_balance2 = self.client2.get_asset_balance(self.base_asset)
             usdt_balance2 = self.client2.get_asset_balance(self.quote_asset)
+            aster_balance2 = self.client2.get_asset_balance(self.aster_asset)
             
             self.logger.info(f"账户1: {self.base_asset}={at_balance1:.4f}, {self.quote_asset}={usdt_balance1:.2f}")
             self.logger.info(f"账户2: {self.base_asset}={at_balance2:.4f}, {self.quote_asset}={usdt_balance2:.2f}")
@@ -1293,7 +1296,7 @@ class SmartMarketMaker:
         self.logger.info("✅ 缓存数据初始化完成")
 
         self.update_order_book()
-        
+
         # 检查并初始化AT余额
         self.logger.info("\n🔍 检查AT余额状态...")
         if not self.initialize_at_balance():
