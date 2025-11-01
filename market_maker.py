@@ -68,6 +68,14 @@ class TradingPairConfig:
     max_price_change: float = 0.005
     min_depth_multiplier: float = 2
 
+@dataclass
+class HistoricalVolume:
+    """历史交易量统计"""
+    account1_volume: float = 0.0
+    account2_volume: float = 0.0
+    account1_trade_count: int = 0
+    account2_trade_count: int = 0
+
 class AsterDexClient:
     def __init__(self, api_key: str, secret_key: str, account_name: str):
         self.api_key = api_key
@@ -409,6 +417,9 @@ class SmartMarketMaker:
         
         # 为每个交易对维护独立的状态
         self.pair_states = {}
+        # 为每个交易对维护独立的历史交易量统计
+        self.historical_volumes = {}
+        
         for pair in self.trading_pairs:
             self.pair_states[pair.symbol] = {
                 'order_book': OrderBook(bids=[], asks=[], update_time=0),
@@ -422,18 +433,14 @@ class SmartMarketMaker:
                 'partial_limit_sell_count': 0,
                 'volume': 0
             }
+            
+            # 初始化每个交易对的历史交易量统计
+            self.historical_volumes[pair.symbol] = HistoricalVolume()
         
         # Aster购买统计
         self.aster_buy_attempts = 0
         self.aster_buy_success = 0
         self.aster_buy_failed = 0
-        
-        # 历史交易量统计
-        self.historical_volume_account1 = 0.0
-        self.historical_volume_account2 = 0.0
-        self.total_historical_volume = 0.0
-        self.historical_trade_count_account1 = 0
-        self.historical_trade_count_account2 = 0
 
     def load_trading_pairs_config(self) -> List[TradingPairConfig]:
         """加载多交易对配置"""
@@ -545,7 +552,7 @@ class SmartMarketMaker:
                 buy_price = best_bid + 0.00001
                 
                 # 检查USDT余额是否足够
-                usdt_balance = client.get_asset_balance(self.quote_asset)
+                usdt_balance = client.get_asset_balance('USDT')
                 required_usdt = self.aster_buy_quantity * buy_price
                 
                 if usdt_balance < required_usdt:
@@ -645,12 +652,15 @@ class SmartMarketMaker:
         return False
 
     def calculate_historical_volume(self):
-        """计算历史所有交易对的现货交易量总和（以USDT为单位）"""
-        self.logger.info("📊 正在计算历史交易量...")
+        """计算每个交易对的历史现货交易量（以USDT为单位）"""
+        self.logger.info("📊 正在计算各交易对的历史交易量...")
         
         # 为每个交易对计算历史交易量
         for pair in self.trading_pairs:
             self.logger.info(f"计算交易对 {pair.symbol} 的历史交易量...")
+            
+            # 初始化该交易对的历史交易量统计
+            historical_volume = self.historical_volumes[pair.symbol]
             
             # 计算账户1的历史交易量
             try:
@@ -659,8 +669,10 @@ class SmartMarketMaker:
                 for trade in trades_account1:
                     if trade.get('symbol') == pair.symbol:
                         quote_qty = float(trade.get('quoteQty', 0))
-                        self.historical_volume_account1 += quote_qty
-                        self.historical_trade_count_account1 += 1
+                        historical_volume.account1_volume += quote_qty
+                        historical_volume.account1_trade_count += 1
+                        
+                self.logger.info(f"✅ 账户1 {pair.symbol} 历史交易: {historical_volume.account1_trade_count} 笔, 交易量: {historical_volume.account1_volume:.2f} USDT")
                         
             except Exception as e:
                 self.logger.error(f"❌ 获取账户1 {pair.symbol} 历史交易量失败: {e}")
@@ -672,17 +684,46 @@ class SmartMarketMaker:
                 for trade in trades_account2:
                     if trade.get('symbol') == pair.symbol:
                         quote_qty = float(trade.get('quoteQty', 0))
-                        self.historical_volume_account2 += quote_qty
-                        self.historical_trade_count_account2 += 1
+                        historical_volume.account2_volume += quote_qty
+                        historical_volume.account2_trade_count += 1
+                        
+                self.logger.info(f"✅ 账户2 {pair.symbol} 历史交易: {historical_volume.account2_trade_count} 笔, 交易量: {historical_volume.account2_volume:.2f} USDT")
                         
             except Exception as e:
                 self.logger.error(f"❌ 获取账户2 {pair.symbol} 历史交易量失败: {e}")
+            
+            # 计算该交易对的总历史交易量
+            total_volume = historical_volume.account1_volume + historical_volume.account2_volume
+            total_trade_count = historical_volume.account1_trade_count + historical_volume.account2_trade_count
+            self.logger.info(f"💰 {pair.symbol} 总历史交易: {total_trade_count} 笔, 交易量: {total_volume:.2f} USDT")
+    
+    def print_historical_volume_statistics(self):
+        """打印各交易对的历史交易量统计"""
+        self.logger.info("\n💰 各交易对历史交易量统计:")
         
-        self.total_historical_volume = self.historical_volume_account1 + self.historical_volume_account2
-        total_trade_count = self.historical_trade_count_account1 + self.historical_trade_count_account2
-        self.logger.info(f"💰 总历史交易: {total_trade_count} 笔, 交易量: {self.total_historical_volume:.2f} USDT")
+        for pair in self.trading_pairs:
+            historical_volume = self.historical_volumes[pair.symbol]
+            total_volume = historical_volume.account1_volume + historical_volume.account2_volume
+            total_trade_count = historical_volume.account1_trade_count + historical_volume.account2_trade_count
+            
+            self.logger.info(f"\n   {pair.symbol}:")
+            self.logger.info(f"     账户1: {historical_volume.account1_trade_count} 笔, {historical_volume.account1_volume:.2f} USDT")
+            self.logger.info(f"     账户2: {historical_volume.account2_trade_count} 笔, {historical_volume.account2_volume:.2f} USDT")
+            self.logger.info(f"     总计: {total_trade_count} 笔, {total_volume:.2f} USDT")
         
-        return self.total_historical_volume
+        # 计算所有交易对的总历史交易量
+        total_all_volume = sum(
+            historical_volume.account1_volume + historical_volume.account2_volume 
+            for historical_volume in self.historical_volumes.values()
+        )
+        total_all_trade_count = sum(
+            historical_volume.account1_trade_count + historical_volume.account2_trade_count 
+            for historical_volume in self.historical_volumes.values()
+        )
+        
+        self.logger.info(f"\n   🌟 所有交易对总计:")
+        self.logger.info(f"     总交易笔数: {total_all_trade_count} 笔")
+        self.logger.info(f"     总交易量: {total_all_volume:.2f} USDT")
     
     def initialize_at_balance(self, pair: TradingPairConfig) -> bool:
         """初始化指定交易对的余额"""
@@ -701,8 +742,8 @@ class SmartMarketMaker:
             self.logger.info(f"🔄 两个账户都没有足够的{pair.base_asset}余额，开始初始化...")
             
             # 选择USDT余额较多的账号进行买入
-            usdt_balance1 = self.client1.get_asset_balance(pair.quote_asset)
-            usdt_balance2 = self.client2.get_asset_balance(pair.quote_asset)
+            usdt_balance1 = self.client1.get_asset_balance('USDT')
+            usdt_balance2 = self.client2.get_asset_balance('USDT')
             
             if usdt_balance1 >= usdt_balance2 and usdt_balance1 > 0:
                 # 账户1买入
@@ -931,10 +972,10 @@ class SmartMarketMaker:
         
         if buy_client_name == 'ACCOUNT1':
             # 账户1买，需要USDT
-            available_usdt = self.client1.get_asset_balance(pair.quote_asset)
+            available_usdt = self.client1.get_asset_balance('USDT')
         else:
             # 账户2买，需要USDT
-            available_usdt = self.client2.get_asset_balance(pair.quote_asset)
+            available_usdt = self.client2.get_asset_balance('USDT')
         
         # 计算需要的USDT金额
         bid, ask, _, _ = self.get_best_bid_ask(pair)
@@ -1447,15 +1488,6 @@ class SmartMarketMaker:
         self.logger.info(f"   最低要求余额: {self.min_aster_balance:.4f}")
         self.logger.info(f"   每次购买数量: {self.aster_buy_quantity:.4f}")
     
-    def print_historical_volume_statistics(self):
-        """打印历史交易量统计"""
-        self.logger.info("\n💰 历史交易量统计:")
-        self.logger.info(f"   账户1 历史交易: {self.historical_trade_count_account1} 笔, 交易量: {self.historical_volume_account1:.2f} USDT")
-        self.logger.info(f"   账户2 历史交易: {self.historical_trade_count_account2} 笔, 交易量: {self.historical_volume_account2:.2f} USDT")
-        total_trade_count = self.historical_trade_count_account1 + self.historical_trade_count_account2
-        total_historical_volume = self.historical_volume_account1 + self.historical_volume_account2
-        self.logger.info(f"   总历史交易: {total_trade_count} 笔, 交易量: {total_historical_volume:.2f} USDT")
-    
     def print_account_balances(self):
         """打印账户余额（使用缓存数据）"""
         try:
@@ -1585,6 +1617,7 @@ class SmartMarketMaker:
         self.logger.info("\n初始账户余额和推荐交易方向:")
         self.print_account_balances()
         self.print_aster_statistics()
+        self.print_historical_volume_statistics()
         self.logger.info("")
         
         # 启动交易
