@@ -1010,7 +1010,7 @@ class SmartMarketMaker:
         at_balance1 = self.client1.get_asset_balance(pair.base_asset)
         at_balance2 = self.client2.get_asset_balance(pair.base_asset)
         
-        if at_balance1 <= pair.fixed_buy_quantity and at_balance2 <= pair.fixed_buy_quantity:
+        if at_balance1 < pair.fixed_buy_quantity/2 and at_balance2 < pair.fixed_buy_quantity/2:
             self.logger.warning(f"⚠️ 两个账户都没有足够的{pair.base_asset}余额，尝试初始化...")
             if self.initialize_at_balance(pair):
                 self.logger.info(f"✅ {pair.base_asset}余额初始化成功，继续交易")
@@ -1545,6 +1545,7 @@ class SmartMarketMaker:
                     if state['volume'] >= current_pair.target_volume:
                         self.logger.info(f"🎉 {current_pair.symbol}达到目标交易量: {state['volume']:.2f}/{current_pair.target_volume}")
                         # 切换到下一个交易对
+                        time.sleep(self.check_interval)
                         self.switch_to_next_pair()
                 else:
                     consecutive_failures += 1
@@ -1562,6 +1563,7 @@ class SmartMarketMaker:
                 self.logger.info(f"{current_pair.symbol}进度: {progress:.1f}% ({current_state['volume']:.2f}/{current_pair.target_volume}), 成功率: {success_rate:.1f}%")
                 
                 # 切换到下一个交易对（轮换）
+                time.sleep(self.check_interval)
                 self.switch_to_next_pair()
                 time.sleep(self.check_interval)
                 
