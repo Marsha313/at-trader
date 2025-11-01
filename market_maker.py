@@ -733,12 +733,12 @@ class SmartMarketMaker:
         self.logger.info(f"检查{pair.base_asset}余额: 账户1={at_balance1:.4f}, 账户2={at_balance2:.4f}")
         
         # 如果两个账号都有足够的余额，不需要初始化
-        if at_balance1 > pair.fixed_buy_quantity and at_balance2 > pair.fixed_buy_quantity:
+        if at_balance1 >= pair.fixed_buy_quantity and at_balance2 >= pair.fixed_buy_quantity:
             self.logger.info(f"✅ 两个账户都有足够的{pair.base_asset}余额，无需初始化")
             return True
         
         # 如果两个账号都没有足够的余额，选择一个账号买入
-        if at_balance1 <= pair.fixed_buy_quantity and at_balance2 <= pair.fixed_buy_quantity:
+        if at_balance1 < pair.fixed_buy_quantity and at_balance2 < pair.fixed_buy_quantity:
             self.logger.info(f"🔄 两个账户都没有足够的{pair.base_asset}余额，开始初始化...")
             
             # 选择USDT余额较多的账号进行买入
