@@ -431,7 +431,10 @@ class SmartMarketMaker:
                 'market_sell_success_count': 0,
                 'limit_sell_attempt_count': 0,
                 'partial_limit_sell_count': 0,
-                'volume': 0
+                'volume': 0,
+                'smart_limit_success_count': 0,
+                'dynamic_quantity_used': 0,
+                'total_slippage': 0.0
             }
             
             # 初始化每个交易对的历史交易量统计
@@ -441,6 +444,240 @@ class SmartMarketMaker:
         self.aster_buy_attempts = 0
         self.aster_buy_success = 0
         self.aster_buy_failed = 0
+
+    def calculate_optimal_prices(self, pair: TradingPairConfig) -> Tuple[float, float, float]:
+        """计算更优的挂单价格"""
+        bid, ask, bid_qty, ask_qty = self.get_best_bid_ask(pair)
+        if bid == 0 or ask == 0:
+            return 0, 0, 0
+        
+        mid_price = (bid + ask) / 2
+        spread = ask - bid
+        
+        # 根据市场深度动态调整挂单位置
+        depth_ratio = bid_qty / ask_qty if ask_qty > 0 else 1
+        
+        # 卖单价格：根据深度调整，深度好时更接近卖一价
+        if depth_ratio > 2:  # 买盘深度好
+            sell_price = ask - spread * 0.2
+        elif depth_ratio < 0.5:  # 卖盘深度好
+            sell_price = ask - spread * 0.1
+        else:
+            sell_price = ask - spread * 0.15
+        
+        # 买单价格：类似逻辑
+        if depth_ratio > 2:
+            buy_price = bid + spread * 0.1
+        elif depth_ratio < 0.5:
+            buy_price = bid + spread * 0.2
+        else:
+            buy_price = bid + spread * 0.15
+        
+        # 确保价格符合精度要求
+        tick_size, _ = self.client1.get_symbol_precision(pair.symbol)
+        sell_price = round(sell_price / tick_size) * tick_size
+        buy_price = round(buy_price / tick_size) * tick_size
+        
+        return sell_price, buy_price, mid_price
+    
+    def strategy_smart_limit(self, pair: TradingPairConfig) -> bool:
+        """策略3: 智能限价单对冲 - 减少磨损的核心策略"""
+        self.logger.info(f"执行策略3: {pair.symbol}智能限价单对冲")
+        
+        try:
+            # 计算最优挂单价格
+            sell_price, buy_price, mid_price = self.calculate_optimal_prices(pair)
+            if sell_price == 0 or buy_price == 0:
+                return False
+            
+            timestamp = int(time.time() * 1000)
+            sell_client_name, buy_client_name = self.get_current_trade_direction(pair)
+            
+            sell_client = self.client1 if sell_client_name == 'ACCOUNT1' else self.client2
+            buy_client = self.client1 if buy_client_name == 'ACCOUNT1' else self.client2
+            
+            # 卖单数量：实际持有量
+            sell_quantity, _ = self.get_sell_quantity(pair, sell_client_name)
+            # 买单数量：固定配置量
+            buy_quantity = pair.fixed_buy_quantity
+            
+            # 生成订单ID
+            sell_order_id = f"{sell_client_name.lower()}_{pair.base_asset.lower()}_smart_sell_{timestamp}"
+            buy_order_id = f"{buy_client_name.lower()}_{pair.base_asset.lower()}_smart_buy_{timestamp}"
+            
+            self.logger.info(f"{pair.symbol}智能限价单: 卖出={sell_quantity:.4f}@{sell_price:.5f}, 买入={buy_quantity:.4f}@{buy_price:.5f}")
+            self.logger.info(f"{pair.symbol}价差分析: 买一={self.get_best_bid_ask(pair)[0]:.5f}, 卖一={self.get_best_bid_ask(pair)[1]:.5f}, 中间价={mid_price:.5f}")
+            
+            # 同时挂限价单
+            sell_order = sell_client.create_order(
+                symbol=pair.symbol,
+                side='SELL',
+                order_type='LIMIT',
+                quantity=sell_quantity,
+                price=sell_price,
+                newClientOrderId=sell_order_id
+            )
+            
+            buy_order = buy_client.create_order(
+                symbol=pair.symbol,
+                side='BUY',
+                order_type='LIMIT',
+                quantity=buy_quantity,
+                price=buy_price,
+                newClientOrderId=buy_order_id
+            )
+            
+            if 'orderId' not in sell_order or 'orderId' not in buy_order:
+                self.logger.error(f"{pair.symbol}智能限价单挂单失败: 卖单={sell_order}, 买单={buy_order}")
+                if 'orderId' in sell_order:
+                    sell_client.cancel_order(pair.symbol, origClientOrderId=sell_order_id)
+                if 'orderId' in buy_order:
+                    buy_client.cancel_order(pair.symbol, origClientOrderId=buy_order_id)
+                return False
+            
+            self.logger.info(f"{pair.symbol}智能限价单已挂出，等待成交...")
+            
+            # 监控订单状态，设置更长的等待时间
+            start_time = time.time()
+            max_wait_time = 30  # 限价单可以等待更久
+            sell_filled = False
+            buy_filled = False
+            
+            while time.time() - start_time < max_wait_time:
+                # 检查市场变化，如果价格变动太大就调整订单
+                current_bid, current_ask, _, _ = self.get_best_bid_ask(pair)
+                if current_bid == 0 or current_ask == 0:
+                    break
+                    
+                current_mid = (current_bid + current_ask) / 2
+                price_change = abs(current_mid - mid_price) / mid_price
+                
+                # 如果价格变动超过阈值，重新调整订单
+                if price_change > 0.001:  # 0.1%的价格变动
+                    self.logger.info(f"{pair.symbol}价格变动较大({price_change:.4%})，重新调整订单...")
+                    sell_client.cancel_order(pair.symbol, origClientOrderId=sell_order_id)
+                    buy_client.cancel_order(pair.symbol, origClientOrderId=buy_order_id)
+                    return self.strategy_smart_limit(pair)  # 递归调用重新挂单
+                
+                # 检查订单状态
+                if not sell_filled:
+                    sell_status = sell_client.get_order(pair.symbol, origClientOrderId=sell_order_id)
+                    if sell_status.get('status') == 'FILLED':
+                        sell_filled = True
+                        self.logger.info(f"✅ {pair.symbol}智能限价卖单已成交")
+                
+                if not buy_filled:
+                    buy_status = buy_client.get_order(pair.symbol, origClientOrderId=buy_order_id)
+                    if buy_status.get('status') == 'FILLED':
+                        buy_filled = True
+                        self.logger.info(f"✅ {pair.symbol}智能限价买单已成交")
+                
+                if sell_filled and buy_filled:
+                    break
+                    
+                time.sleep(1)
+            
+            # 清理未完成订单
+            if not sell_filled:
+                sell_client.cancel_order(pair.symbol, origClientOrderId=sell_order_id)
+            if not buy_filled:
+                buy_client.cancel_order(pair.symbol, origClientOrderId=buy_order_id)
+            
+            success = sell_filled and buy_filled
+            
+            if success:
+                state = self.pair_states[pair.symbol]
+                state['smart_limit_success_count'] = state.get('smart_limit_success_count', 0) + 1
+                self.update_cache_after_trade(pair)
+                self.logger.info(f"🎯 {pair.symbol}智能限价单对冲成功!")
+            else:
+                self.logger.warning(f"⚠️ {pair.symbol}智能限价单未完全成交")
+                # 如果限价单失败，可以fallback到其他策略
+                if sell_filled != buy_filled:  # 只有一个成交
+                    return self.handle_imbalance_situation(pair, sell_filled, buy_filled, sell_client, buy_client, timestamp)
+            
+            return success
+            
+        except Exception as e:
+            self.logger.error(f"{pair.symbol}策略3执行出错: {e}")
+            return False
+        
+    def handle_imbalance_situation(self, pair: TradingPairConfig, sell_filled: bool, buy_filled: bool,
+                             sell_client: AsterDexClient, buy_client: AsterDexClient, timestamp: int) -> bool:
+        """处理单边成交的不平衡情况"""
+        if sell_filled and not buy_filled:
+            # 卖单成交但买单未成交，需要市价买入对冲
+            self.logger.warning(f"🔄 {pair.symbol}卖单成交但买单未成交，执行市价买入对冲")
+            buy_quantity = pair.fixed_buy_quantity
+            buy_order = buy_client.create_order(
+                symbol=pair.symbol,
+                side='BUY',
+                order_type='MARKET',
+                quantity=buy_quantity,
+                newClientOrderId=f"{pair.base_asset.lower()}_hedge_buy_{timestamp}"
+            )
+            return 'orderId' in buy_order
+            
+        elif buy_filled and not sell_filled:
+            # 买单成交但卖单未成交，需要市价卖出对冲
+            self.logger.warning(f"🔄 {pair.symbol}买单成交但卖单未成交，执行市价卖出对冲")
+            sell_quantity, _ = self.get_sell_quantity(pair)
+            sell_order = sell_client.create_order(
+                symbol=pair.symbol,
+                side='SELL',
+                order_type='MARKET',
+                quantity=sell_quantity,
+                newClientOrderId=f"{pair.base_asset.lower()}_hedge_sell_{timestamp}"
+            )
+            return 'orderId' in sell_order
+        
+        return False
+    
+    def calculate_dynamic_quantity(self, pair: TradingPairConfig) -> float:
+        """根据市场深度动态计算交易量"""
+        bid, ask, bid_qty, ask_qty = self.get_best_bid_ask(pair)
+        if bid == 0 or ask == 0:
+            return pair.fixed_buy_quantity
+        
+        # 计算市场可承受的交易量（不超过第一档深度的20%）
+        available_quantity = min(bid_qty, ask_qty) * 0.2
+        
+        # 确保不低于最小交易量，不高于固定交易量
+        min_quantity = pair.fixed_buy_quantity * 0.5
+        dynamic_quantity = max(min_quantity, min(pair.fixed_buy_quantity, available_quantity))
+        
+        # 符合交易对精度
+        _, step_size = self.client1.get_symbol_precision(pair.symbol)
+        dynamic_quantity = math.floor(dynamic_quantity / step_size) * step_size
+        
+        if dynamic_quantity != pair.fixed_buy_quantity:
+            self.logger.info(f"📊 {pair.symbol}动态调整交易量: {pair.fixed_buy_quantity} -> {dynamic_quantity:.4f}")
+        
+        return dynamic_quantity
+    
+    def check_market_conditions_optimized(self, pair: TradingPairConfig) -> bool:
+        """优化的市场条件检查，减少不必要的交易"""
+        # 原有的条件检查
+        if not self.check_market_conditions(pair):
+            return False
+        
+        bid, ask, bid_qty, ask_qty = self.get_best_bid_ask(pair)
+        spread = self.calculate_spread_percentage(bid, ask)
+        
+        # 增加额外条件：只有在价差足够小时才交易
+        min_profitable_spread = 0.001  # 0.1%，考虑手续费后的最小盈利价差
+        if spread < min_profitable_spread:
+            self.logger.info(f"{pair.symbol}价差过小({spread:.4%})，不足以覆盖手续费，跳过交易")
+            return False
+        
+        # 检查市场深度质量
+        min_depth_quality = 1.5  # 买卖深度比例
+        depth_quality = min(bid_qty, ask_qty) / pair.fixed_buy_quantity
+        if depth_quality < min_depth_quality:
+            self.logger.info(f"{pair.symbol}市场深度不足({depth_quality:.2f})，跳过交易")
+            return False
+        
+        return True
 
     def load_trading_pairs_config(self) -> List[TradingPairConfig]:
         """加载多交易对配置"""
@@ -1411,36 +1648,41 @@ class SmartMarketMaker:
         self.logger.info(f"✅ {pair.symbol}缓存数据已更新")
     
     def execute_trading_cycle(self, pair: TradingPairConfig) -> bool:
-        """执行一个交易周期"""
-        if not self.check_market_conditions(pair):
+        """优化的交易周期执行"""
+        if not self.check_market_conditions_optimized(pair):
             return False
         
         state = self.pair_states[pair.symbol]
         state['trade_count'] += 1
         
         success = False
+        strategy_used = "未知"
         
-        if self.strategy in [TradingStrategy.MARKET_ONLY, TradingStrategy.BOTH]:
-            success = self.strategy_market_only(pair)
-            if success:
-                state['successful_trades'] += 1
+        # 优先使用智能限价单策略（磨损最小）
+        if self.strategy in [TradingStrategy.BOTH, TradingStrategy.LIMIT_MARKET]:
+            success = self.strategy_smart_limit(pair)
+            strategy_used = "智能限价单"
         
-        if self.strategy in [TradingStrategy.LIMIT_MARKET, TradingStrategy.BOTH] and not success:
+        # 如果智能限价单失败，fallback到原有策略
+        if not success and self.strategy in [TradingStrategy.BOTH, TradingStrategy.LIMIT_MARKET]:
             success = self.strategy_limit_market(pair)
-            if success:
-                state['successful_trades'] += 1
+            strategy_used = "限价+市价"
+        
+        if not success and self.strategy in [TradingStrategy.BOTH, TradingStrategy.MARKET_ONLY]:
+            success = self.strategy_market_only(pair)
+            strategy_used = "纯市价"
         
         if success:
-            trade_volume = pair.fixed_buy_quantity * 2
+            state['successful_trades'] += 1
+            # 使用动态交易量计算实际交易量
+            actual_quantity = self.calculate_dynamic_quantity(pair)
+            trade_volume = actual_quantity * 2  # 买卖双方
             state['volume'] += trade_volume
             self.total_volume += trade_volume
             
-            sell_account, buy_account = self.get_current_trade_direction(pair)
-            self.logger.info(f"✓ {pair.symbol}交易成功! {sell_account}卖出 → {buy_account}买入")
-            self.logger.info(f"  {pair.symbol}本次交易量: {trade_volume:.4f}, 累计: {state['volume']:.2f}/{pair.target_volume}")
+            self.logger.info(f"✓ {pair.symbol}交易成功! 策略: {strategy_used}, 数量: {actual_quantity:.4f}")
         else:
-            self.logger.error(f"✗ {pair.symbol}交易失败")
-            self.update_cache_after_failure(pair)
+            self.logger.warning(f"✗ {pair.symbol}所有策略均失败")
         
         return success
     
@@ -1469,6 +1711,8 @@ class SmartMarketMaker:
                 self.logger.info(f"     卖单限价单成功率: {limit_sell_success_rate:.1f}%")
             
             self.logger.info(f"     卖单市价单成功次数: {state['market_sell_success_count']}")
+            # 新增智能限价单统计
+            self.logger.info(f"     智能限价单成功次数: {state.get('smart_limit_success_count', 0)}")
             self.logger.info(f"     累计交易量: {state['volume']:.2f}/{pair.target_volume}")
         
         # Aster购买统计
