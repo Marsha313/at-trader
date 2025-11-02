@@ -1153,7 +1153,7 @@ class SmartMarketMaker:
                 remaining_quantity = self.client2.get_asset_balance(pair.base_asset)
             self.logger.info(f"📤 {pair.symbol}限价卖单部分成交 剩余 {remaining_quantity:.4f} {pair.base_asset} ")
 
-            if remaining_quantity > 0:
+            if remaining_quantity > 0.1:
                 self.logger.info(f"📤 {pair.symbol}剩余 {remaining_quantity:.4f} {pair.base_asset} 需要市价卖出")
                 
                 # 立即下市价卖单，卖出剩余的全部数量
