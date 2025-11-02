@@ -1810,7 +1810,7 @@ class SmartMarketMaker:
                     consecutive_failures += 1
                     if consecutive_failures >= 3:
                         self.logger.warning("连续多次交易失败，暂停20秒并切换到下一个交易对...")
-                        time.sleep(20)
+                        time.sleep(self.check_interval)
                         consecutive_failures = 0
                         # 切换到下一个交易对
                         self.switch_to_next_pair()
