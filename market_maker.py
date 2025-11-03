@@ -1312,6 +1312,8 @@ class SmartMarketMaker:
                     sell_was_limit = False
                     
                     emergency_sell_quantity, _ = self.get_sell_quantity(pair, sell_client_name)
+                    if emergency_sell_quantity > 5000:
+                        emergency_sell_quantity = 5000  # 限制单次卖出最大数量，防止异常
                     if emergency_sell_quantity > 0:
                         emergency_sell = sell_client.create_order(
                             symbol=pair.symbol,
@@ -1554,8 +1556,8 @@ class SmartMarketMaker:
                 else:
                     consecutive_failures += 1
                     if consecutive_failures >= 3:
-                        self.logger.warning("连续多次交易失败，暂停20秒并切换到下一个交易对...")
-                        time.sleep(20)
+                        self.logger.warning("连续多次交易失败，暂停2秒并切换到下一个交易对...")
+                        time.sleep(2)
                         consecutive_failures = 0
                         # 切换到下一个交易对
                         self.switch_to_next_pair()
