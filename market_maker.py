@@ -776,7 +776,7 @@ class SmartMarketMaker:
             
             # 执行市价买入
             timestamp = int(time.time() * 1000)
-            buy_order_id = f"{buy_client_name.lower()}_{pair.base_asset.lower()}_init_buy_{timestamp}"
+            buy_order_id = f"{buy_client_name.lower()}_{pair.base_asset.lower()}_ib_{timestamp}"
             
             buy_order = buy_client.create_order(
                 symbol=pair.symbol,
@@ -1074,8 +1074,8 @@ class SmartMarketMaker:
             buy_client = self.client1 if buy_client_name == 'ACCOUNT1' else self.client2
             
             # 生成订单ID
-            sell_order_id = f"{sell_client_name.lower()}_{pair.base_asset.lower()}_sell_{timestamp}"
-            buy_order_id = f"{buy_client_name.lower()}_{pair.base_asset.lower()}_buy_{timestamp}"
+            sell_order_id = f"{sell_client_name.lower()}_{pair.base_asset.lower()}_s_{timestamp}"
+            buy_order_id = f"{buy_client_name.lower()}_{pair.base_asset.lower()}_b_{timestamp}"
             
             # 卖单数量：实际持有量
             sell_quantity, _ = self.get_sell_quantity(pair, sell_client_name)
@@ -1162,7 +1162,7 @@ class SmartMarketMaker:
                     side='SELL',
                     order_type='MARKET',
                     quantity=remaining_quantity,
-                    newClientOrderId=f"{pair.base_asset.lower()}_emergency_sell_{timestamp}"
+                    newClientOrderId=f"{pair.base_asset.lower()}_es_{timestamp}"
                 )
                 
                 if 'orderId' in emergency_sell:
@@ -1172,7 +1172,7 @@ class SmartMarketMaker:
                     time.sleep(2)
                     
                     # 检查卖单状态
-                    sell_status = sell_client.get_order(pair.symbol, origClientOrderId=f"{pair.base_asset.lower()}_emergency_sell_{timestamp}")
+                    sell_status = sell_client.get_order(pair.symbol, origClientOrderId=f"{pair.base_asset.lower()}_es_{timestamp}")
                     if sell_status.get('status') in ['FILLED', 'PARTIALLY_FILLED']:
                         self.logger.info(f"✅ {pair.symbol}紧急市价卖单已成交")
                         # 强制刷新余额缓存，确保数据最新
@@ -1211,8 +1211,8 @@ class SmartMarketMaker:
             buy_client = self.client1 if buy_client_name == 'ACCOUNT1' else self.client2
             
             # 生成订单ID
-            sell_order_id = f"{sell_client_name.lower()}_{pair.base_asset.lower()}_limit_sell_{timestamp}"
-            buy_order_id = f"{buy_client_name.lower()}_{pair.base_asset.lower()}_market_buy_{timestamp}"
+            sell_order_id = f"{sell_client_name.lower()}_{pair.base_asset.lower()}_ls_{timestamp}"
+            buy_order_id = f"{buy_client_name.lower()}_{pair.base_asset.lower()}_mb_{timestamp}"
             
             # 卖单数量：实际持有量
             sell_quantity, _ = self.get_sell_quantity(pair, sell_client_name)
@@ -1221,6 +1221,8 @@ class SmartMarketMaker:
             
             # 设置卖单价格为卖一价减0.00001
             sell_price = ask - 0.00001
+            if sell_price <= bid:
+                sell_price = bid + 0.00001  # 确保卖价高于买一价
             
             self.logger.info(f"{pair.symbol}交易详情: {sell_client_name}卖出={sell_quantity:.4f}@{sell_price:.5f}, {buy_client_name}买入={buy_quantity:.4f}")
             
@@ -1314,7 +1316,7 @@ class SmartMarketMaker:
                             side='SELL',
                             order_type='MARKET',
                             quantity=emergency_sell_quantity,
-                            newClientOrderId=f"{pair.base_asset.lower()}_emergency_sell_{timestamp}"
+                            newClientOrderId=f"{pair.base_asset.lower()}_es_{timestamp}"
                         )
                         
                         if 'orderId' in emergency_sell:
