@@ -1743,9 +1743,7 @@ class SmartMarketMaker:
             # BOTH策略：先尝试限价双方，失败后尝试其他策略
             success = self.strategy_limit_both(pair)
             if not success:
-                success = self.strategy_market_only(pair)
-                if not success:
-                    success = self.strategy_limit_market(pair)
+                success = self.strategy_limit_market(pair)
         
         if success:
             trade_volume = pair.fixed_buy_quantity * 2
