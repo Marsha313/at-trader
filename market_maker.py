@@ -1182,7 +1182,7 @@ class SmartMarketMaker:
                 elapsed_time = current_time - start_time
                 
                 # 如果一方完全成交，但另一方未成交，等待一段时间后转为市价单
-                wait_before_market = 5  # 等待3秒后转为市价单
+                wait_before_market = 10  # 等待3秒后转为市价单
                 
                 if elapsed_time > wait_before_market:
                     # 情况1: 卖单完全成交，但买单未完全成交
