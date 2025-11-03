@@ -1182,7 +1182,7 @@ class SmartMarketMaker:
                 elapsed_time = current_time - start_time
                 
                 # 如果一方完全成交，但另一方未成交，等待一段时间后转为市价单
-                wait_before_market = 3  # 等待3秒后转为市价单
+                wait_before_market = 5  # 等待3秒后转为市价单
                 
                 if elapsed_time > wait_before_market:
                     # 情况1: 卖单完全成交，但买单未完全成交
@@ -1270,10 +1270,10 @@ class SmartMarketMaker:
                 # 情况3: 双方都部分成交，继续等待
                 if sell_partial_filled and buy_partial_filled:
                     # 继续等待完全成交
-                    time.sleep(0.5)
+                    time.sleep(2)
                     continue
                 
-                time.sleep(0.5)
+                time.sleep(2)
             
             # 超时处理：取消所有未成交订单
             self.logger.warning(f"⏰ {pair.symbol}限价单对冲超时，取消未成交订单")
