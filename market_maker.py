@@ -1209,7 +1209,7 @@ class SmartMarketMaker:
                                 side='BUY',
                                 order_type='MARKET',
                                 quantity=remaining_buy_qty,
-                                newClientOrderId=f"{buy_order_id}_market"
+                                newClientOrderId=f"{buy_order_id}_m"
                             )
                             
                             if 'orderId' in market_buy_order:
@@ -1250,7 +1250,7 @@ class SmartMarketMaker:
                                 side='SELL',
                                 order_type='MARKET',
                                 quantity=remaining_sell_qty,
-                                newClientOrderId=f"{sell_order_id}_market"
+                                newClientOrderId=f"{sell_order_id}_m"
                             )
                             
                             if 'orderId' in market_sell_order:
@@ -1305,7 +1305,7 @@ class SmartMarketMaker:
                             side='SELL',
                             order_type='MARKET',
                             quantity=remaining_sell_qty,
-                            newClientOrderId=f"{sell_order_id}_timeout_market"
+                            newClientOrderId=f"{sell_order_id}_tm"
                         )
                         
                         if 'orderId' in market_sell:
@@ -1327,7 +1327,7 @@ class SmartMarketMaker:
                             side='BUY',
                             order_type='MARKET',
                             quantity=remaining_buy_qty,
-                            newClientOrderId=f"{buy_order_id}_timeout_market"
+                            newClientOrderId=f"{buy_order_id}_tm"
                         )
                         
                         if 'orderId' in market_buy:
