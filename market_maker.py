@@ -1216,6 +1216,8 @@ class SmartMarketMaker:
             
             # 卖单数量：实际持有量
             sell_quantity, _ = self.get_sell_quantity(pair, sell_client_name)
+            if sell_quantity > 5000:
+                sell_quantity = 5000  # 限制单次卖出最大数量，防止异常
             # 买单数量：固定配置量
             buy_quantity = pair.fixed_buy_quantity
             
