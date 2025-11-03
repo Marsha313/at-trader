@@ -41,9 +41,10 @@ logger = setup_logging()
 load_dotenv()
 
 class TradingStrategy(Enum):
-    BOTH_LIMIT = "both_limit"
+    MARKET_ONLY = "market_only"
     LIMIT_MARKET = "limit_market"
     BOTH = "both"
+    LIMIT_BOTH = "limit_both"  # 新增：双方限价单策略
 
 @dataclass
 class OrderBook:
@@ -67,6 +68,7 @@ class TradingPairConfig:
     max_spread: float = 0.002
     max_price_change: float = 0.005
     min_depth_multiplier: float = 2
+    strategy: TradingStrategy = TradingStrategy.BOTH  # 新增：每个交易对的策略
 
 @dataclass
 class HistoricalVolume:
@@ -388,9 +390,9 @@ class SmartMarketMaker:
         self.max_retry = int(os.getenv('MAX_RETRY', 3))
         self.order_timeout = float(os.getenv('ORDER_TIMEOUT', 10))
         
-        # 策略选择
+        # 策略选择（默认策略，会被交易对特定策略覆盖）
         strategy_str = os.getenv('TRADING_STRATEGY', 'BOTH').upper()
-        self.strategy = getattr(TradingStrategy, strategy_str, TradingStrategy.BOTH)
+        self.default_strategy = getattr(TradingStrategy, strategy_str, TradingStrategy.BOTH)
         
         # 初始化客户端
         self.client1 = AsterDexClient(
@@ -431,6 +433,7 @@ class SmartMarketMaker:
                 'market_sell_success_count': 0,
                 'limit_sell_attempt_count': 0,
                 'partial_limit_sell_count': 0,
+                'limit_both_success_count': 0,  # 新增：限价双方策略成功次数
                 'volume': 0
             }
             
@@ -443,7 +446,7 @@ class SmartMarketMaker:
         self.aster_buy_failed = 0
 
     def load_trading_pairs_config(self) -> List[TradingPairConfig]:
-        """加载多交易对配置"""
+        """加载多交易对配置，支持每个交易对独立策略"""
         pairs_config = []
         
         # 从环境变量读取交易对配置
@@ -459,6 +462,13 @@ class SmartMarketMaker:
             max_price_change = float(os.getenv(f'{base_asset}_MAX_PRICE_CHANGE', 0.005))
             min_depth_multiplier = float(os.getenv(f'{base_asset}_MIN_DEPTH_MULTIPLIER', 2))
             
+            # 读取交易对特定策略，如果没有则使用默认策略
+            strategy_str = os.getenv(f'{base_asset}_STRATEGY', '').upper()
+            if strategy_str and hasattr(TradingStrategy, strategy_str):
+                strategy = getattr(TradingStrategy, strategy_str)
+            else:
+                strategy = self.default_strategy
+            
             pair_config = TradingPairConfig(
                 symbol=pair_symbol,
                 base_asset=base_asset,
@@ -466,7 +476,8 @@ class SmartMarketMaker:
                 target_volume=target_volume,
                 max_spread=max_spread,
                 max_price_change=max_price_change,
-                min_depth_multiplier=min_depth_multiplier
+                min_depth_multiplier=min_depth_multiplier,
+                strategy=strategy
             )
             pairs_config.append(pair_config)
             
@@ -476,6 +487,7 @@ class SmartMarketMaker:
             self.logger.info(f"   目标交易量: {target_volume}")
             self.logger.info(f"   最大价差: {max_spread:.4%}")
             self.logger.info(f"   最大价格波动: {max_price_change:.4%}")
+            self.logger.info(f"   交易策略: {strategy.value}")
         
         return pairs_config
 
@@ -487,7 +499,7 @@ class SmartMarketMaker:
         """切换到下一个交易对"""
         self.current_pair_index = (self.current_pair_index + 1) % len(self.trading_pairs)
         current_pair = self.get_current_trading_pair()
-        self.logger.info(f"🔄 切换到交易对: {current_pair.symbol}")
+        self.logger.info(f"🔄 切换到交易对: {current_pair.symbol} (策略: {current_pair.strategy.value})")
 
     def check_and_buy_aster_if_needed(self) -> bool:
         """检查并购买Aster代币（如果需要）"""
@@ -1058,8 +1070,8 @@ class SmartMarketMaker:
         self.logger.info(f"✓ {pair.symbol}市场条件满足: 价差={spread:.4%}, 波动={volatility:.4%}")
         self.logger.info(f"  {pair.symbol}交易方向: {sell_account}卖出{sell_quantity:.4f}, {buy_account}买入{pair.fixed_buy_quantity:.4f}")
         return True
-    
-    def strategy_both_limit(self, pair: TradingPairConfig) -> bool:
+
+    def strategy_limit_both(self, pair: TradingPairConfig) -> bool:
         """策略1: 限价卖单 + 限价买单对冲，智能订单管理"""
         self.logger.info(f"执行策略1: {pair.symbol}限价单对冲")
         
@@ -1173,7 +1185,7 @@ class SmartMarketMaker:
                 if sell_filled and buy_filled:
                     self.logger.info(f"🎉 {pair.symbol}限价单对冲完全成交!")
                     state = self.pair_states[pair.symbol]
-                    state['limit_sell_success_count'] += 1
+                    state['limit_both_success_count'] += 1
                     self.update_cache_after_trade(pair)
                     return True
                 
@@ -1182,7 +1194,7 @@ class SmartMarketMaker:
                 elapsed_time = current_time - start_time
                 
                 # 如果一方完全成交，但另一方未成交，等待一段时间后转为市价单
-                wait_before_market = 10  # 等待3秒后转为市价单
+                wait_before_market = 3  # 等待3秒后转为市价单
                 
                 if elapsed_time > wait_before_market:
                     # 情况1: 卖单完全成交，但买单未完全成交
@@ -1209,7 +1221,7 @@ class SmartMarketMaker:
                                 side='BUY',
                                 order_type='MARKET',
                                 quantity=remaining_buy_qty,
-                                newClientOrderId=f"{buy_order_id}_m"
+                                newClientOrderId=f"{buy_order_id}_market"
                             )
                             
                             if 'orderId' in market_buy_order:
@@ -1250,7 +1262,7 @@ class SmartMarketMaker:
                                 side='SELL',
                                 order_type='MARKET',
                                 quantity=remaining_sell_qty,
-                                newClientOrderId=f"{sell_order_id}_m"
+                                newClientOrderId=f"{sell_order_id}_market"
                             )
                             
                             if 'orderId' in market_sell_order:
@@ -1270,10 +1282,10 @@ class SmartMarketMaker:
                 # 情况3: 双方都部分成交，继续等待
                 if sell_partial_filled and buy_partial_filled:
                     # 继续等待完全成交
-                    time.sleep(2)
+                    time.sleep(0.5)
                     continue
                 
-                time.sleep(2)
+                time.sleep(0.5)
             
             # 超时处理：取消所有未成交订单
             self.logger.warning(f"⏰ {pair.symbol}限价单对冲超时，取消未成交订单")
@@ -1305,7 +1317,7 @@ class SmartMarketMaker:
                             side='SELL',
                             order_type='MARKET',
                             quantity=remaining_sell_qty,
-                            newClientOrderId=f"{sell_order_id}_tm"
+                            newClientOrderId=f"{sell_order_id}_timeout_market"
                         )
                         
                         if 'orderId' in market_sell:
@@ -1327,7 +1339,7 @@ class SmartMarketMaker:
                             side='BUY',
                             order_type='MARKET',
                             quantity=remaining_buy_qty,
-                            newClientOrderId=f"{buy_order_id}_tm"
+                            newClientOrderId=f"{buy_order_id}_timeout_market"
                         )
                         
                         if 'orderId' in market_buy:
@@ -1352,7 +1364,78 @@ class SmartMarketMaker:
             except:
                 pass
             return False
+
+    def strategy_market_only(self, pair: TradingPairConfig) -> bool:
+        """策略2: 同时挂市价单对冲"""
+        self.logger.info(f"执行策略2: {pair.symbol}同时市价单对冲")
         
+        try:
+            timestamp = int(time.time() * 1000)
+            
+            # 动态获取交易方向（使用缓存）
+            sell_client_name, buy_client_name = self.get_current_trade_direction(pair)
+            
+            # 确定买卖客户端
+            sell_client = self.client1 if sell_client_name == 'ACCOUNT1' else self.client2
+            buy_client = self.client1 if buy_client_name == 'ACCOUNT1' else self.client2
+            
+            # 生成订单ID
+            sell_order_id = f"{sell_client_name.lower()[-1]}_{pair.base_asset.lower()}_s_{timestamp}"
+            buy_order_id = f"{buy_client_name.lower()[-1]}_{pair.base_asset.lower()}_b_{timestamp}"
+            
+            # 卖单数量：实际持有量
+            sell_quantity, _ = self.get_sell_quantity(pair, sell_client_name)
+            # 买单数量：固定配置量
+            buy_quantity = pair.fixed_buy_quantity
+            
+            self.logger.info(f"{pair.symbol}交易详情: {sell_client_name}卖出={sell_quantity:.4f}, {buy_client_name}买入={buy_quantity:.4f}")
+            
+            # 同时下市价单
+            sell_order = sell_client.create_order(
+                symbol=pair.symbol,
+                side='SELL',
+                order_type='MARKET',
+                quantity=sell_quantity,
+                newClientOrderId=sell_order_id
+            )
+            
+            if 'orderId' not in sell_order:
+                self.logger.error(f"{pair.symbol}市价卖单失败: {sell_order}")
+                return False
+            
+            buy_order = buy_client.create_order(
+                symbol=pair.symbol,
+                side='BUY',
+                order_type='MARKET',
+                quantity=buy_quantity,
+                newClientOrderId=buy_order_id
+            )
+            
+            if 'orderId' not in buy_order:
+                self.logger.error(f"{pair.symbol}市价买单失败: {buy_order}")
+                sell_client.cancel_order(pair.symbol, origClientOrderId=sell_order_id)
+                return False
+            
+            self.logger.info(f"{pair.symbol}市价单对冲已提交: 卖单={sell_order_id}, 买单={buy_order_id}")
+            
+            # 等待并检查成交
+            success = self.wait_for_orders_completion([
+                (sell_client, sell_order_id),
+                (buy_client, buy_order_id)
+            ], pair.symbol)
+            
+            # 交易成功后更新缓存和统计
+            if success:
+                state = self.pair_states[pair.symbol]
+                state['market_sell_success_count'] += 1
+                self.update_cache_after_trade(pair)
+            
+            return success
+            
+        except Exception as e:
+            self.logger.error(f"{pair.symbol}策略2执行出错: {e}")
+            return False
+    
     def handle_partial_limit_sell(self, sell_client: AsterDexClient, pair: TradingPairConfig, 
                                 sell_order_id: str, sell_client_name: str, timestamp: int) -> bool:
         """处理限价卖单部分成交的情况"""
@@ -1419,8 +1502,8 @@ class SmartMarketMaker:
             return False
     
     def strategy_limit_market(self, pair: TradingPairConfig) -> bool:
-        """策略2: 限价卖单 + 市价买单"""
-        self.logger.info(f"执行策略2: {pair.symbol}限价卖单 + 市价买单")
+        """策略3: 限价卖单 + 市价买单"""
+        self.logger.info(f"执行策略3: {pair.symbol}限价卖单 + 市价买单")
         
         try:
             bid, ask, _, _ = self.get_best_bid_ask(pair)
@@ -1575,7 +1658,7 @@ class SmartMarketMaker:
             return success
             
         except Exception as e:
-            self.logger.error(f"{pair.symbol}策略2执行出错: {e}")
+            self.logger.error(f"{pair.symbol}策略3执行出错: {e}")
             return False
     
     def wait_for_orders_completion(self, orders: List[Tuple[AsterDexClient, str]], symbol: str) -> bool:
@@ -1640,7 +1723,7 @@ class SmartMarketMaker:
         self.logger.info(f"✅ {pair.symbol}缓存数据已更新")
     
     def execute_trading_cycle(self, pair: TradingPairConfig) -> bool:
-        """执行一个交易周期"""
+        """执行一个交易周期，根据交易对配置选择策略"""
         if not self.check_market_conditions(pair):
             return False
         
@@ -1649,15 +1732,20 @@ class SmartMarketMaker:
         
         success = False
         
-        if self.strategy in [TradingStrategy.BOTH_LIMIT, TradingStrategy.BOTH]:
-            success = self.strategy_both_limit(pair)
-            if success:
-                state['successful_trades'] += 1
-        
-        if self.strategy in [TradingStrategy.LIMIT_MARKET, TradingStrategy.BOTH] and not success:
+        # 根据交易对配置的策略执行相应的交易策略
+        if pair.strategy == TradingStrategy.LIMIT_BOTH:
+            success = self.strategy_limit_both(pair)
+        elif pair.strategy == TradingStrategy.MARKET_ONLY:
+            success = self.strategy_market_only(pair)
+        elif pair.strategy == TradingStrategy.LIMIT_MARKET:
             success = self.strategy_limit_market(pair)
-            if success:
-                state['successful_trades'] += 1
+        elif pair.strategy == TradingStrategy.BOTH:
+            # BOTH策略：先尝试限价双方，失败后尝试其他策略
+            success = self.strategy_limit_both(pair)
+            if not success:
+                success = self.strategy_market_only(pair)
+                if not success:
+                    success = self.strategy_limit_market(pair)
         
         if success:
             trade_volume = pair.fixed_buy_quantity * 2
@@ -1665,10 +1753,10 @@ class SmartMarketMaker:
             self.total_volume += trade_volume
             
             sell_account, buy_account = self.get_current_trade_direction(pair)
-            self.logger.info(f"✓ {pair.symbol}交易成功! {sell_account}卖出 → {buy_account}买入")
+            self.logger.info(f"✓ {pair.symbol}交易成功! {sell_account}卖出 → {buy_account}买入 (策略: {pair.strategy.value})")
             self.logger.info(f"  {pair.symbol}本次交易量: {trade_volume:.4f}, 累计: {state['volume']:.2f}/{pair.target_volume}")
         else:
-            self.logger.error(f"✗ {pair.symbol}交易失败")
+            self.logger.error(f"✗ {pair.symbol}交易失败 (策略: {pair.strategy.value})")
             self.update_cache_after_failure(pair)
         
         return success
@@ -1681,7 +1769,7 @@ class SmartMarketMaker:
         # 打印每个交易对的统计
         for pair in self.trading_pairs:
             state = self.pair_states[pair.symbol]
-            self.logger.info(f"\n   {pair.symbol}统计:")
+            self.logger.info(f"\n   {pair.symbol}统计 (策略: {pair.strategy.value}):")
             self.logger.info(f"     总尝试次数: {state['trade_count']}")
             self.logger.info(f"     成功交易次数: {state['successful_trades']}")
             
@@ -1698,6 +1786,7 @@ class SmartMarketMaker:
                 self.logger.info(f"     卖单限价单成功率: {limit_sell_success_rate:.1f}%")
             
             self.logger.info(f"     卖单市价单成功次数: {state['market_sell_success_count']}")
+            self.logger.info(f"     限价双方策略成功次数: {state.get('limit_both_success_count', 0)}")
             self.logger.info(f"     累计交易量: {state['volume']:.2f}/{pair.target_volume}")
         
         # Aster购买统计
@@ -1740,7 +1829,7 @@ class SmartMarketMaker:
                 
                 # 显示当前推荐交易方向
                 sell_account, buy_account = self.get_current_trade_direction(pair)
-                self.logger.info(f"   {pair.symbol}推荐方向: {sell_account}卖出 → {buy_account}买入")
+                self.logger.info(f"   {pair.symbol}推荐方向: {sell_account}卖出 → {buy_account}买入 (策略: {pair.strategy.value})")
             
         except Exception as e:
             self.logger.error(f"获取余额时出错: {e}")
@@ -1789,7 +1878,7 @@ class SmartMarketMaker:
                 current_state = self.pair_states[current_pair.symbol]
                 progress = current_state['volume'] / current_pair.target_volume * 100
                 success_rate = (current_state['successful_trades'] / current_state['trade_count'] * 100) if current_state['trade_count'] > 0 else 0
-                self.logger.info(f"{current_pair.symbol}进度: {progress:.1f}% ({current_state['volume']:.2f}/{current_pair.target_volume}), 成功率: {success_rate:.1f}%")
+                self.logger.info(f"{current_pair.symbol}进度: {progress:.1f}% ({current_state['volume']:.2f}/{current_pair.target_volume}), 成功率: {success_rate:.1f}%, 策略: {current_pair.strategy.value}")
                 
                 # 切换到下一个交易对（轮换）
                 time.sleep(self.check_interval)
@@ -1808,10 +1897,10 @@ class SmartMarketMaker:
         self.logger.info("多交易对智能刷量交易程序启动")
         self.logger.info(f"交易对数量: {len(self.trading_pairs)}")
         for i, pair in enumerate(self.trading_pairs):
-            self.logger.info(f"  {i+1}. {pair.symbol} (目标: {pair.target_volume}, 数量: {pair.fixed_buy_quantity})")
+            self.logger.info(f"  {i+1}. {pair.symbol} (目标: {pair.target_volume}, 数量: {pair.fixed_buy_quantity}, 策略: {pair.strategy.value})")
         self.logger.info(f"Aster代币: {self.aster_asset}")
         self.logger.info(f"最低Aster余额: {self.min_aster_balance}")
-        self.logger.info(f"策略: {self.strategy.value}")
+        self.logger.info(f"默认策略: {self.default_strategy.value}")
         self.logger.info("=" * 60)
         
         # 初始化缓存
