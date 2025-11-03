@@ -41,7 +41,7 @@ logger = setup_logging()
 load_dotenv()
 
 class TradingStrategy(Enum):
-    MARKET_ONLY = "market_only"
+    BOTH_LIMIT = "both_limit"
     LIMIT_MARKET = "limit_market"
     BOTH = "both"
 
@@ -1059,11 +1059,12 @@ class SmartMarketMaker:
         self.logger.info(f"  {pair.symbol}交易方向: {sell_account}卖出{sell_quantity:.4f}, {buy_account}买入{pair.fixed_buy_quantity:.4f}")
         return True
     
-    def strategy_market_only(self, pair: TradingPairConfig) -> bool:
-        """策略1: 同时挂市价单对冲"""
-        self.logger.info(f"执行策略1: {pair.symbol}同时市价单对冲")
+    def strategy_both_limit(self, pair: TradingPairConfig) -> bool:
+        """策略1: 限价卖单 + 限价买单对冲，智能订单管理"""
+        self.logger.info(f"执行策略1: {pair.symbol}限价单对冲")
         
         try:
+            bid, ask, _, _ = self.get_best_bid_ask(pair)
             timestamp = int(time.time() * 1000)
             
             # 动态获取交易方向（使用缓存）
@@ -1074,62 +1075,284 @@ class SmartMarketMaker:
             buy_client = self.client1 if buy_client_name == 'ACCOUNT1' else self.client2
             
             # 生成订单ID
-            sell_order_id = f"{sell_client_name.lower()}_{pair.base_asset.lower()}_s_{timestamp}"
-            buy_order_id = f"{buy_client_name.lower()}_{pair.base_asset.lower()}_b_{timestamp}"
+            sell_order_id = f"{sell_client_name.lower()}_{pair.base_asset.lower()}_ls_{timestamp}"
+            buy_order_id = f"{buy_client_name.lower()}_{pair.base_asset.lower()}_lb_{timestamp}"
             
             # 卖单数量：实际持有量
             sell_quantity, _ = self.get_sell_quantity(pair, sell_client_name)
+            if sell_quantity > 5000:
+                sell_quantity = 5000  # 限制单次卖出最大数量，防止异常
             # 买单数量：固定配置量
             buy_quantity = pair.fixed_buy_quantity
             
-            self.logger.info(f"{pair.symbol}交易详情: {sell_client_name}卖出={sell_quantity:.4f}, {buy_client_name}买入={buy_quantity:.4f}")
+            # 设置卖单价格为卖一价减0.00001（更优价格，更容易成交）
+            sell_price = ask - 0.00001
+            if sell_price <= bid:
+                sell_price = bid + 0.00001  # 确保卖价高于买一价
             
-            # 同时下市价单
+            # 设置买单价格为买一价加0.00001（更优价格，更容易成交）
+            buy_price = bid + 0.00001
+            if buy_price >= ask:
+                buy_price = ask - 0.00001  # 确保买价低于卖一价
+            
+            self.logger.info(f"{pair.symbol}交易详情:")
+            self.logger.info(f"  {sell_client_name}卖出: {sell_quantity:.4f} @ {sell_price:.5f}")
+            self.logger.info(f"  {buy_client_name}买入: {buy_quantity:.4f} @ {buy_price:.5f}")
+            
+            # 同时挂限价单
             sell_order = sell_client.create_order(
                 symbol=pair.symbol,
                 side='SELL',
-                order_type='MARKET',
+                order_type='LIMIT',
                 quantity=sell_quantity,
+                price=sell_price,
                 newClientOrderId=sell_order_id
             )
             
             if 'orderId' not in sell_order:
-                self.logger.error(f"{pair.symbol}市价卖单失败: {sell_order}")
+                self.logger.error(f"{pair.symbol}限价卖单失败: {sell_order}")
                 return False
             
             buy_order = buy_client.create_order(
                 symbol=pair.symbol,
                 side='BUY',
-                order_type='MARKET',
+                order_type='LIMIT',
                 quantity=buy_quantity,
+                price=buy_price,
                 newClientOrderId=buy_order_id
             )
             
             if 'orderId' not in buy_order:
-                self.logger.error(f"{pair.symbol}市价买单失败: {buy_order}")
+                self.logger.error(f"{pair.symbol}限价买单失败: {buy_order}")
                 sell_client.cancel_order(pair.symbol, origClientOrderId=sell_order_id)
                 return False
             
-            self.logger.info(f"{pair.symbol}市价单对冲已提交: 卖单={sell_order_id}, 买单={buy_order_id}")
+            self.logger.info(f"{pair.symbol}限价单对冲已挂出:")
+            self.logger.info(f"  卖单: {sell_order_id} (价格: {sell_price:.6f}, 数量: {sell_quantity:.4f})")
+            self.logger.info(f"  买单: {buy_order_id} (价格: {buy_price:.6f}, 数量: {buy_quantity:.4f})")
             
-            # 等待并检查成交
-            success = self.wait_for_orders_completion([
-                (sell_client, sell_order_id),
-                (buy_client, buy_order_id)
-            ], pair.symbol)
+            # 监控订单状态
+            start_time = time.time()
+            sell_filled = False
+            buy_filled = False
+            sell_partial_filled = False
+            buy_partial_filled = False
             
-            # 交易成功后更新缓存和统计
+            while time.time() - start_time < self.order_timeout:
+                # 检查卖单状态
+                if not sell_filled:
+                    sell_status = sell_client.get_order(pair.symbol, origClientOrderId=sell_order_id)
+                    sell_status_value = sell_status.get('status')
+                    
+                    if sell_status_value == 'FILLED':
+                        sell_filled = True
+                        self.logger.info(f"✅ {pair.symbol}限价卖单已完全成交")
+                    elif sell_status_value == 'PARTIALLY_FILLED':
+                        sell_partial_filled = True
+                        executed_qty = float(sell_status.get('executedQty', 0))
+                        orig_qty = float(sell_status.get('origQty', 0))
+                        fill_rate = (executed_qty / orig_qty) * 100
+                        self.logger.info(f"🔄 {pair.symbol}限价卖单部分成交: {executed_qty:.4f}/{orig_qty:.4f} ({fill_rate:.1f}%)")
+                
+                # 检查买单状态
+                if not buy_filled:
+                    buy_status = buy_client.get_order(pair.symbol, origClientOrderId=buy_order_id)
+                    buy_status_value = buy_status.get('status')
+                    
+                    if buy_status_value == 'FILLED':
+                        buy_filled = True
+                        self.logger.info(f"✅ {pair.symbol}限价买单已完全成交")
+                    elif buy_status_value == 'PARTIALLY_FILLED':
+                        buy_partial_filled = True
+                        executed_qty = float(buy_status.get('executedQty', 0))
+                        orig_qty = float(buy_status.get('origQty', 0))
+                        fill_rate = (executed_qty / orig_qty) * 100
+                        self.logger.info(f"🔄 {pair.symbol}限价买单部分成交: {executed_qty:.4f}/{orig_qty:.4f} ({fill_rate:.1f}%)")
+                
+                # 如果双方都完全成交，交易成功
+                if sell_filled and buy_filled:
+                    self.logger.info(f"🎉 {pair.symbol}限价单对冲完全成交!")
+                    state = self.pair_states[pair.symbol]
+                    state['limit_sell_success_count'] += 1
+                    self.update_cache_after_trade(pair)
+                    return True
+                
+                # 智能订单管理：如果一方完全成交但另一方未成交
+                current_time = time.time()
+                elapsed_time = current_time - start_time
+                
+                # 如果一方完全成交，但另一方未成交，等待一段时间后转为市价单
+                wait_before_market = 3  # 等待3秒后转为市价单
+                
+                if elapsed_time > wait_before_market:
+                    # 情况1: 卖单完全成交，但买单未完全成交
+                    if sell_filled and not buy_filled:
+                        self.logger.warning(f"⚠️ {pair.symbol}卖单已成交但买单未成交，取消限价买单并转为市价买单")
+                        
+                        # 取消剩余的限价买单
+                        cancel_result = buy_client.cancel_order(pair.symbol, origClientOrderId=buy_order_id)
+                        if 'orderId' in cancel_result:
+                            self.logger.info(f"✅ {pair.symbol}限价买单已取消")
+                        
+                        # 计算剩余需要买入的数量
+                        if buy_partial_filled:
+                            buy_status = buy_client.get_order(pair.symbol, origClientOrderId=buy_order_id)
+                            executed_qty = float(buy_status.get('executedQty', 0))
+                            remaining_buy_qty = buy_quantity - executed_qty
+                        else:
+                            remaining_buy_qty = buy_quantity
+                        
+                        if remaining_buy_qty > 0:
+                            # 下市价买单补全
+                            market_buy_order = buy_client.create_order(
+                                symbol=pair.symbol,
+                                side='BUY',
+                                order_type='MARKET',
+                                quantity=remaining_buy_qty,
+                                newClientOrderId=f"{buy_order_id}_market"
+                            )
+                            
+                            if 'orderId' in market_buy_order:
+                                self.logger.info(f"✅ {pair.symbol}市价补单单已提交: 数量={remaining_buy_qty:.4f}")
+                                # 等待市价单成交
+                                time.sleep(2)
+                                buy_filled = True
+                                state = self.pair_states[pair.symbol]
+                                state['market_sell_success_count'] += 1
+                            else:
+                                self.logger.error(f"❌ {pair.symbol}市价补单单失败")
+                                return False
+                        
+                        self.update_cache_after_trade(pair)
+                        return True
+                    
+                    # 情况2: 买单完全成交，但卖单未完全成交
+                    elif buy_filled and not sell_filled:
+                        self.logger.warning(f"⚠️ {pair.symbol}买单已成交但卖单未成交，取消限价卖单并转为市价卖单")
+                        
+                        # 取消剩余的限价卖单
+                        cancel_result = sell_client.cancel_order(pair.symbol, origClientOrderId=sell_order_id)
+                        if 'orderId' in cancel_result:
+                            self.logger.info(f"✅ {pair.symbol}限价卖单已取消")
+                        
+                        # 计算剩余需要卖出的数量
+                        if sell_partial_filled:
+                            sell_status = sell_client.get_order(pair.symbol, origClientOrderId=sell_order_id)
+                            executed_qty = float(sell_status.get('executedQty', 0))
+                            remaining_sell_qty = sell_quantity - executed_qty
+                        else:
+                            remaining_sell_qty = sell_quantity
+                        
+                        if remaining_sell_qty > 0:
+                            # 下市价卖单补全
+                            market_sell_order = sell_client.create_order(
+                                symbol=pair.symbol,
+                                side='SELL',
+                                order_type='MARKET',
+                                quantity=remaining_sell_qty,
+                                newClientOrderId=f"{sell_order_id}_market"
+                            )
+                            
+                            if 'orderId' in market_sell_order:
+                                self.logger.info(f"✅ {pair.symbol}市价补卖单已提交: 数量={remaining_sell_qty:.4f}")
+                                # 等待市价单成交
+                                time.sleep(2)
+                                sell_filled = True
+                                state = self.pair_states[pair.symbol]
+                                state['market_sell_success_count'] += 1
+                            else:
+                                self.logger.error(f"❌ {pair.symbol}市价补卖单失败")
+                                return False
+                        
+                        self.update_cache_after_trade(pair)
+                        return True
+                
+                # 情况3: 双方都部分成交，继续等待
+                if sell_partial_filled and buy_partial_filled:
+                    # 继续等待完全成交
+                    time.sleep(0.5)
+                    continue
+                
+                time.sleep(0.5)
+            
+            # 超时处理：取消所有未成交订单
+            self.logger.warning(f"⏰ {pair.symbol}限价单对冲超时，取消未成交订单")
+            
+            if not sell_filled:
+                cancel_result = sell_client.cancel_order(pair.symbol, origClientOrderId=sell_order_id)
+                if 'orderId' in cancel_result:
+                    self.logger.info(f"✅ {pair.symbol}限价卖单已取消")
+            
+            if not buy_filled:
+                cancel_result = buy_client.cancel_order(pair.symbol, origClientOrderId=buy_order_id)
+                if 'orderId' in cancel_result:
+                    self.logger.info(f"✅ {pair.symbol}限价买单已取消")
+            
+            # 检查是否有部分成交需要处理
+            success = False
+            if sell_partial_filled or buy_partial_filled:
+                self.logger.info(f"🔄 {pair.symbol}处理部分成交情况...")
+                
+                # 如果卖单部分成交，用市价卖出剩余数量
+                if sell_partial_filled and not sell_filled:
+                    sell_status = sell_client.get_order(pair.symbol, origClientOrderId=sell_order_id)
+                    executed_qty = float(sell_status.get('executedQty', 0))
+                    remaining_sell_qty = sell_quantity - executed_qty
+                    
+                    if remaining_sell_qty > 0:
+                        market_sell = sell_client.create_order(
+                            symbol=pair.symbol,
+                            side='SELL',
+                            order_type='MARKET',
+                            quantity=remaining_sell_qty,
+                            newClientOrderId=f"{sell_order_id}_timeout_market"
+                        )
+                        
+                        if 'orderId' in market_sell:
+                            self.logger.info(f"✅ {pair.symbol}超时市价卖单已提交")
+                            success = True
+                            state = self.pair_states[pair.symbol]
+                            state['market_sell_success_count'] += 1
+                            state['partial_limit_sell_count'] += 1
+                
+                # 如果买单部分成交，用市价买入剩余数量
+                if buy_partial_filled and not buy_filled:
+                    buy_status = buy_client.get_order(pair.symbol, origClientOrderId=buy_order_id)
+                    executed_qty = float(buy_status.get('executedQty', 0))
+                    remaining_buy_qty = buy_quantity - executed_qty
+                    
+                    if remaining_buy_qty > 0:
+                        market_buy = buy_client.create_order(
+                            symbol=pair.symbol,
+                            side='BUY',
+                            order_type='MARKET',
+                            quantity=remaining_buy_qty,
+                            newClientOrderId=f"{buy_order_id}_timeout_market"
+                        )
+                        
+                        if 'orderId' in market_buy:
+                            self.logger.info(f"✅ {pair.symbol}超时市价买单已提交")
+                            success = True
+            
             if success:
-                state = self.pair_states[pair.symbol]
-                state['market_sell_success_count'] += 1
                 self.update_cache_after_trade(pair)
+                self.logger.info(f"✅ {pair.symbol}部分成交已通过市价单补全")
+            else:
+                self.logger.error(f"❌ {pair.symbol}限价单对冲失败")
+                self.update_cache_after_failure(pair)
             
             return success
             
         except Exception as e:
             self.logger.error(f"{pair.symbol}策略1执行出错: {e}")
+            # 尝试取消可能已挂出的订单
+            try:
+                self.client1.cancel_order(pair.symbol, origClientOrderId=sell_order_id)
+                self.client2.cancel_order(pair.symbol, origClientOrderId=buy_order_id)
+            except:
+                pass
             return False
-    
+        
     def handle_partial_limit_sell(self, sell_client: AsterDexClient, pair: TradingPairConfig, 
                                 sell_order_id: str, sell_client_name: str, timestamp: int) -> bool:
         """处理限价卖单部分成交的情况"""
@@ -1426,8 +1649,8 @@ class SmartMarketMaker:
         
         success = False
         
-        if self.strategy in [TradingStrategy.MARKET_ONLY, TradingStrategy.BOTH]:
-            success = self.strategy_market_only(pair)
+        if self.strategy in [TradingStrategy.BOTH_LIMIT, TradingStrategy.BOTH]:
+            success = self.strategy_both_limit(pair)
             if success:
                 state['successful_trades'] += 1
         
