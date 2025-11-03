@@ -2234,7 +2234,8 @@ class SmartMarketMaker:
             try:
                 # 获取当前交易对
                 current_pair = self.get_current_trading_pair()
-                
+                self.client1.cancel_all_orders(current_pair.symbol)
+                self.client2.cancel_all_orders(current_pair.symbol)
                 # 更新市场数据
                 self.update_order_book(current_pair)
                 
