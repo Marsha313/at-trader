@@ -1175,66 +1175,253 @@ class SmartMarketMaker:
         self.logger.info(f"🎯 {pair.symbol} 最佳策略推荐: {best_strategy[0].value} (成功率: {best_strategy[1].success_rate:.1f}%)")
         return best_strategy[0]
     
-    def check_market_conditions(self, pair: TradingPairConfig) -> bool:
-        """检查指定交易对的市场条件是否满足交易（包含余额不足重试机制）"""
+    def check_market_conditions(self, pair: TradingPairConfig) -> Tuple[bool, str]:
+        """检查指定交易对的市场条件是否满足交易，返回状态和交易模式"""
         # 首先检查Aster余额，如果不足则购买
         if not self.check_and_buy_aster_if_needed():
             self.logger.error("❌ Aster余额检查失败，暂停交易")
-            return False
+            return False, "error"
         
-        # 检查基础资产余额状态，如果两个账号都没有足够的余额，先初始化
+        # 检查基础资产余额状态
         at_balance1 = self.client1.get_asset_balance(pair.base_asset)
         at_balance2 = self.client2.get_asset_balance(pair.base_asset)
         
-        if at_balance1 < pair.fixed_buy_quantity/2 and at_balance2 < pair.fixed_buy_quantity/2:
+        # 判断两个账户的余额是否都充足
+        balance_threshold = pair.fixed_buy_quantity / 2
+        both_accounts_sufficient = (at_balance1 >= balance_threshold and 
+                                at_balance2 >= balance_threshold)
+        
+        if both_accounts_sufficient:
+            self.logger.info(f"✅ 两个账户{pair.base_asset}余额都充足，使用仅卖出模式")
+            return True, "sell_only"
+        
+        # 原有的余额初始化逻辑
+        if at_balance1 < balance_threshold and at_balance2 < balance_threshold:
             self.logger.warning(f"⚠️ 两个账户都没有足够的{pair.base_asset}余额，尝试初始化...")
             if self.initialize_at_balance(pair):
                 self.logger.info(f"✅ {pair.base_asset}余额初始化成功，继续交易")
             else:
                 self.logger.error(f"❌ {pair.base_asset}余额初始化失败，暂停交易")
-                return False
-            
-        # 检查卖单条件（使用重试机制）
+                return False, "error"
+        
+        # 检查卖单条件
         if not self.check_sell_conditions_with_retry(pair, max_retry=3, wait_time=20):
             self.logger.error(f"{pair.symbol}卖单条件检查失败，{pair.base_asset}余额持续不足")
-            return False
+            return False, "error"
         
-        # 检查买单条件（使用重试机制）
+        # 检查买单条件
         if not self.check_buy_conditions_with_retry(pair, max_retry=3, wait_time=20):
             self.logger.error(f"{pair.symbol}买单条件检查失败，USDT余额持续不足")
-            return False
+            return False, "error"
         
         # 原有的市场条件检查
         bid, ask, bid_qty, ask_qty = self.get_best_bid_ask(pair)
         
         if bid == 0 or ask == 0:
-            return False
+            return False, "error"
             
         # 检查价差
         spread = self.calculate_spread_percentage(bid, ask)
         if spread > pair.max_spread:
             self.logger.warning(f"{pair.symbol}价差过大: {spread:.4%} > {pair.max_spread:.4%}")
-            return False
+            return False, "error"
         
         # 检查价格波动
         volatility = self.calculate_price_volatility(pair)
         if volatility > pair.max_price_change:
             self.logger.warning(f"{pair.symbol}价格波动过大: {volatility:.4%} > {pair.max_price_change:.4%}")
-            return False
+            return False, "error"
         
         # 检查深度
         min_required_depth = pair.fixed_buy_quantity * pair.min_depth_multiplier
         if bid_qty < min_required_depth or ask_qty < min_required_depth:
             self.logger.warning(f"{pair.symbol}深度不足: 买一量={bid_qty:.2f}, 卖一量={ask_qty:.2f}, 要求={min_required_depth:.2f}")
-            return False
+            return False, "error"
             
         sell_quantity, sell_account = self.get_sell_quantity(pair)
         _, buy_account = self.get_current_trade_direction(pair)
         
         self.logger.info(f"✓ {pair.symbol}市场条件满足: 价差={spread:.4%}, 波动={volatility:.4%}")
         self.logger.info(f"  {pair.symbol}交易方向: {sell_account}卖出{sell_quantity:.4f}, {buy_account}买入{pair.fixed_buy_quantity:.4f}")
-        return True
+        return True, "normal"
 
+    def execute_sell_only_strategy(self, pair: TradingPairConfig) -> bool:
+        """仅卖出策略：当两个账户余额都充足时，只卖出其中一个账户的代币"""
+        self.logger.info(f"执行仅卖出策略: {pair.symbol}")
+        
+        try:
+            timestamp = int(time.time() * 1000)
+            
+            # 选择卖出账户：选择余额较多的账户卖出
+            at_balance1 = self.client1.get_asset_balance(pair.base_asset)
+            at_balance2 = self.client2.get_asset_balance(pair.base_asset)
+            
+            if at_balance1 >= at_balance2:
+                sell_client = self.client1
+                sell_client_name = 'ACCOUNT1'
+                sell_quantity = min(at_balance1, pair.fixed_buy_quantity)
+            else:
+                sell_client = self.client2
+                sell_client_name = 'ACCOUNT2'
+                sell_quantity = min(at_balance2, pair.fixed_buy_quantity)
+            
+            # 生成订单ID
+            sell_order_id = f"{sell_client_name.lower()[-2:-1]}_{pair.base_asset.lower()}_so_{timestamp}"
+            
+            self.logger.info(f"{pair.symbol}仅卖出详情: {sell_client_name}卖出={sell_quantity:.4f}")
+            
+            # 根据市场条件选择限价单或市价单
+            bid, ask, _, _ = self.get_best_bid_ask(pair)
+            use_limit_order = self.should_use_limit_strategy(pair)
+            
+            if use_limit_order and bid > 0 and ask > 0:
+                # 使用限价卖单
+                sell_price = ask - 0.00001
+                if sell_price <= bid:
+                    sell_price = bid + 0.00001
+                
+                sell_order = sell_client.create_order(
+                    symbol=pair.symbol,
+                    side='SELL',
+                    order_type='LIMIT',
+                    quantity=sell_quantity,
+                    price=sell_price,
+                    newClientOrderId=sell_order_id
+                )
+                
+                if 'orderId' not in sell_order:
+                    self.logger.error(f"{pair.symbol}限价卖单失败: {sell_order}")
+                    return False
+                
+                self.logger.info(f"{pair.symbol}限价卖单已挂出: 价格={sell_price:.6f}, 数量={sell_quantity:.4f}")
+                
+                # 等待限价单成交
+                success = self.wait_for_orders_completion([(sell_client, sell_order_id)], pair.symbol)
+                
+                if not success:
+                    self.logger.warning(f"{pair.symbol}限价卖单未成交，转为市价单")
+                    sell_client.cancel_order(pair.symbol, origClientOrderId=sell_order_id)
+                    # 转为市价单
+                    sell_order = sell_client.create_order(
+                        symbol=pair.symbol,
+                        side='SELL',
+                        order_type='MARKET',
+                        quantity=sell_quantity,
+                        newClientOrderId=f"{sell_order_id}_market"
+                    )
+                    
+                    if 'orderId' not in sell_order:
+                        self.logger.error(f"{pair.symbol}市价卖单失败: {sell_order}")
+                        return False
+                    
+                    success = self.wait_for_orders_completion([(sell_client, f"{sell_order_id}_market")], pair.symbol)
+            else:
+                # 使用市价卖单
+                sell_order = sell_client.create_order(
+                    symbol=pair.symbol,
+                    side='SELL',
+                    order_type='MARKET',
+                    quantity=sell_quantity,
+                    newClientOrderId=sell_order_id
+                )
+                
+                if 'orderId' not in sell_order:
+                    self.logger.error(f"{pair.symbol}市价卖单失败: {sell_order}")
+                    return False
+                
+                self.logger.info(f"{pair.symbol}市价卖单已提交")
+                success = self.wait_for_orders_completion([(sell_client, sell_order_id)], pair.symbol)
+            
+            if success:
+                self.logger.info(f"✅ {pair.symbol}仅卖出策略执行成功")
+                # 更新统计
+                state = self.pair_states[pair.symbol]
+                state['sell_only_success_count'] = state.get('sell_only_success_count', 0) + 1
+            
+            return success
+            
+        except Exception as e:
+            self.logger.error(f"{pair.symbol}仅卖出策略执行出错: {e}")
+            return False
+
+    def execute_trading_cycle(self, pair: TradingPairConfig) -> bool:
+        """执行一个交易周期，根据余额情况选择交易模式"""
+        # 检查市场条件并获取交易模式
+        market_ok, trade_mode = self.check_market_conditions(pair)
+        
+        if not market_ok:
+            return False
+        
+        state = self.pair_states[pair.symbol]
+        state['trade_count'] += 1
+        
+        # 记录开始时间
+        start_time = time.time()
+        
+        success = False
+        
+        if trade_mode == "sell_only":
+            # 仅卖出模式
+            success = self.execute_sell_only_strategy(pair)
+            actual_strategy = TradingStrategy.MARKET_ONLY  # 统计用途
+        else:
+            # 正常对冲交易模式
+            # 原有的策略选择逻辑...
+            actual_strategy = pair.strategy
+            if pair.strategy == TradingStrategy.AUTO:
+                actual_strategy = self.get_best_strategy(pair)
+                self.logger.info(f"🎯 {pair.symbol}自动选择策略: {actual_strategy.value}")
+            
+            # 根据策略执行交易
+            if actual_strategy == TradingStrategy.LIMIT_BOTH:
+                success = self.strategy_limit_both(pair)
+            elif actual_strategy == TradingStrategy.MARKET_ONLY:
+                success = self.strategy_market_only(pair)
+            elif actual_strategy == TradingStrategy.LIMIT_MARKET:
+                success = self.strategy_limit_market(pair)
+            elif actual_strategy == TradingStrategy.BOTH:
+                success = self.strategy_limit_both(pair)
+                if not success:
+                    success = self.strategy_market_only(pair)
+                    if not success:
+                        success = self.strategy_limit_market(pair)
+        
+        # 计算执行时间
+        execution_time = time.time() - start_time
+        
+        # 记录策略性能
+        if success:
+            if trade_mode == "sell_only":
+                # 仅卖出模式的交易量计算
+                trade_volume = pair.fixed_buy_quantity  # 只有卖出量
+            else:
+                # 正常对冲模式的交易量计算
+                trade_volume = pair.fixed_buy_quantity * 2
+                
+            state['volume'] += trade_volume
+            state['successful_trades'] += 1
+            self.total_volume += trade_volume
+            
+            # 记录策略性能
+            self.record_strategy_performance(pair, actual_strategy, True, execution_time, trade_volume)
+            
+            if trade_mode == "sell_only":
+                self.logger.info(f"✓ {pair.symbol}仅卖出交易成功! (耗时: {execution_time:.2f}s)")
+            else:
+                sell_account, buy_account = self.get_current_trade_direction(pair)
+                self.logger.info(f"✓ {pair.symbol}对冲交易成功! {sell_account}卖出 → {buy_account}买入 (策略: {actual_strategy.value}, 耗时: {execution_time:.2f}s)")
+            
+            self.logger.info(f"  {pair.symbol}本次交易量: {trade_volume:.4f}, 累计: {state['volume']:.2f}/{pair.target_volume}")
+            
+            # 更新缓存
+            self.update_cache_after_trade(pair)
+        else:
+            self.logger.error(f"✗ {pair.symbol}交易失败 (模式: {trade_mode}, 耗时: {execution_time:.2f}s)")
+            # 记录失败性能
+            self.record_strategy_performance(pair, actual_strategy, False, execution_time, 0)
+            self.update_cache_after_failure(pair)
+        
+        return success
     def strategy_limit_both(self, pair: TradingPairConfig) -> bool:
         """策略1: 限价卖单 + 限价买单对冲，智能订单管理"""
         self.logger.info(f"执行策略1: {pair.symbol}限价单对冲")
@@ -1939,68 +2126,6 @@ class SmartMarketMaker:
         self.update_trade_direction_cache(pair)
         
         self.logger.info(f"✅ {pair.symbol}缓存数据已更新")
-    
-    def execute_trading_cycle(self, pair: TradingPairConfig) -> bool:
-        """执行一个交易周期，根据交易对配置选择策略"""
-        if not self.check_market_conditions(pair):
-            return False
-        
-        state = self.pair_states[pair.symbol]
-        state['trade_count'] += 1
-        
-        # 记录开始时间
-        start_time = time.time()
-        
-        # 确定实际使用的策略
-        actual_strategy = pair.strategy
-        if pair.strategy == TradingStrategy.AUTO:
-            # 自动策略选择
-            actual_strategy = self.get_best_strategy(pair)
-            self.logger.info(f"🎯 {pair.symbol}自动选择策略: {actual_strategy.value}")
-        
-        success = False
-        
-        # 根据交易对配置的策略执行相应的交易策略
-        if actual_strategy == TradingStrategy.LIMIT_BOTH:
-            success = self.strategy_limit_both(pair)
-        elif actual_strategy == TradingStrategy.MARKET_ONLY:
-            success = self.strategy_market_only(pair)
-        elif actual_strategy == TradingStrategy.LIMIT_MARKET:
-            success = self.strategy_limit_market(pair)
-        elif actual_strategy == TradingStrategy.BOTH:
-            # BOTH策略：先尝试限价双方，失败后尝试其他策略
-            success = self.strategy_limit_both(pair)
-            if not success:
-                success = self.strategy_market_only(pair)
-                if not success:
-                    success = self.strategy_limit_market(pair)
-        
-        # 计算执行时间
-        execution_time = time.time() - start_time
-        
-        # 记录策略性能
-        if success:
-            trade_volume = pair.fixed_buy_quantity * 2
-            state['volume'] += trade_volume
-            state['successful_trades'] += 1
-            self.total_volume += trade_volume
-            
-            # 记录策略性能
-            self.record_strategy_performance(pair, actual_strategy, True, execution_time, trade_volume)
-            
-            sell_account, buy_account = self.get_current_trade_direction(pair)
-            self.logger.info(f"✓ {pair.symbol}交易成功! {sell_account}卖出 → {buy_account}买入 (策略: {actual_strategy.value}, 耗时: {execution_time:.2f}s)")
-            self.logger.info(f"  {pair.symbol}本次交易量: {trade_volume:.4f}, 累计: {state['volume']:.2f}/{pair.target_volume}")
-            
-            # 更新缓存
-            self.update_cache_after_trade(pair)
-        else:
-            self.logger.error(f"✗ {pair.symbol}交易失败 (策略: {actual_strategy.value}, 耗时: {execution_time:.2f}s)")
-            # 记录失败性能
-            self.record_strategy_performance(pair, actual_strategy, False, execution_time, 0)
-            self.update_cache_after_failure(pair)
-        
-        return success
     
     def print_strategy_performance(self):
         """打印策略性能统计"""
