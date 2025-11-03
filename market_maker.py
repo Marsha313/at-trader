@@ -1069,7 +1069,7 @@ class SmartMarketMaker:
         
         # 高流动性标准
         high_liquidity = (
-            spread < 0.001 and  # 价差小于0.1%
+            spread < 0.00005 and  # 价差小于0.1%
             bid_qty > pair.fixed_buy_quantity * 10 and  # 深度充足
             ask_qty > pair.fixed_buy_quantity * 10
         )
@@ -1082,7 +1082,7 @@ class SmartMarketMaker:
         
         # 低流动性特征
         low_liquidity = (
-            spread > 0.005 or  # 价差大于0.5%
+            spread > 0.0002 or  # 价差大于0.5%
             bid_qty < pair.fixed_buy_quantity * 2 or  # 深度不足
             ask_qty < pair.fixed_buy_quantity * 2
         )
@@ -1098,11 +1098,11 @@ class SmartMarketMaker:
         market_score = 0
         
         # 价差评分（越小越好）
-        if spread < 0.001:  # 0.1%
+        if spread < 0.00005:  # 0.1%
             market_score += 3
-        elif spread < 0.002:  # 0.2%
+        elif spread < 0.0001:  # 0.2%
             market_score += 2
-        elif spread < 0.005:  # 0.5%
+        elif spread < 0.0002:  # 0.5%
             market_score += 1
         
         # 深度评分（越大越好）
