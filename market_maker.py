@@ -546,6 +546,9 @@ class SmartMarketMaker:
         self.current_pair_index = (self.current_pair_index + 1) % len(self.trading_pairs)
         current_pair = self.get_current_trading_pair()
         self.logger.info(f"🔄 切换到交易对: {current_pair.symbol} (策略: {current_pair.strategy.value})")
+        if self.current_pair_index == 0:
+            self.logger.info("🔁 已循环回到第一个交易对, 等待1s")
+            time.sleep(1)
 
     def cancel_all_open_orders_before_start(self):
         """启动前取消所有相关交易对的挂单"""
