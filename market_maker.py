@@ -859,7 +859,7 @@ class SmartMarketMaker:
             
             # 执行市价买入
             timestamp = int(time.time() * 1000)
-            buy_order_id = f"{buyclient_name.lower()[-1]}_{pair.base_asset.lower()}_ib_{timestamp}"
+            buy_order_id = f"{buy_client_name.lower()[-2:-1]}_{pair.base_asset.lower()}_ib_{timestamp}"
             
             buy_order = buy_client.create_order(
                 symbol=pair.symbol,
@@ -1248,8 +1248,8 @@ class SmartMarketMaker:
             buy_client = self.client1 if buy_client_name == 'ACCOUNT1' else self.client2
             
             # 生成订单ID
-            sell_order_id = f"{sell_client_name.lower()[-1]}_{pair.base_asset.lower()}_ls_{timestamp}"
-            buy_order_id = f"{buy_client_name.lower()[-1]}_{pair.base_asset.lower()}_lb_{timestamp}"
+            sell_order_id = f"{sell_client_name.lower()[-2:-1]}_{pair.base_asset.lower()}_ls_{timestamp}"
+            buy_order_id = f"{buy_client_name.lower()[-2:-1]}_{pair.base_asset.lower()}_lb_{timestamp}"
             
             # 卖单数量：实际持有量
             sell_quantity, _ = self.get_sell_quantity(pair, sell_client_name)
@@ -1600,8 +1600,8 @@ class SmartMarketMaker:
             buy_client = self.client1 if buy_client_name == 'ACCOUNT1' else self.client2
             
             # 生成订单ID
-            sell_order_id = f"{sellclient_name.lower()[-1]}_{pair.base_asset.lower()}_s_{timestamp}"
-            buy_order_id = f"{buyclient_name.lower()[-1]}_{pair.base_asset.lower()}_b_{timestamp}"
+            sell_order_id = f"{sell_client_name.lower()[-2:-1]}_{pair.base_asset.lower()}_s_{timestamp}"
+            buy_order_id = f"{buy_client_name.lower()[-2:-1]}_{pair.base_asset.lower()}_b_{timestamp}"
             
             # 卖单数量：实际持有量
             sell_quantity, _ = self.get_sell_quantity(pair, sell_client_name)
@@ -1736,8 +1736,8 @@ class SmartMarketMaker:
             buy_client = self.client1 if buy_client_name == 'ACCOUNT1' else self.client2
             
             # 生成订单ID
-            sell_order_id = f"{sellclient_name.lower()[-1]}_{pair.base_asset.lower()}_ls_{timestamp}"
-            buy_order_id = f"{buyclient_name.lower()[-1]}_{pair.base_asset.lower()}_mb_{timestamp}"
+            sell_order_id = f"{sell_client_name.lower()[-2:-1]}_{pair.base_asset.lower()}_ls_{timestamp}"
+            buy_order_id = f"{buy_client_name.lower()[-2:-1]}_{pair.base_asset.lower()}_mb_{timestamp}"
             
             # 卖单数量：实际持有量
             sell_quantity, _ = self.get_sell_quantity(pair, sell_client_name)
