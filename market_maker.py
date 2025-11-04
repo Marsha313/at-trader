@@ -151,6 +151,9 @@ class AsterDexClient:
             return response.json()
         except requests.exceptions.RequestException as e:
             self.logger.error(f"API请求错误 ({self.account_name}): {e}")
+            if e.has('Too Many Requests'):
+                self.logger.error("请求过多，可能被限流,等待30s")
+                time.sleep(30)
             if hasattr(e, 'response') and e.response is not None:
                 self.logger.error(f"错误响应: {e.response.text}")
             return {'error': str(e)}
