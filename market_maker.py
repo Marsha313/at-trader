@@ -1492,7 +1492,7 @@ class SmartMarketMaker:
             
             # 2. 改进的订单监控逻辑
             start_time = time.time()
-            max_wait_time = 20  # 最大等待时间缩短为8秒
+            max_wait_time = 100  # 双边最大等待时间
             check_interval = 0.5
             
             while time.time() - start_time < max_wait_time:
