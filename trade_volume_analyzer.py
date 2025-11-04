@@ -58,9 +58,9 @@ class VolumeStatistics:
         account_count = int(os.getenv('ACCOUNT_COUNT', 2))
         
         for i in range(1, account_count + 1):
-            api_key = os.getenv(f'ACCOUNT{i}_API_KEY')
-            secret_key = os.getenv(f'ACCOUNT{i}_SECRET_KEY')
-            account_name = f'ACCOUNT{i}'
+            api_key = os.getenv(f'ACCOUNT_{i}_API_KEY')
+            secret_key = os.getenv(f'ACCOUNT_{i}_SECRET_KEY')
+            account_name = os.getenv(f'ACCOUNT_{i}_NAME')
             
             if api_key and secret_key:
                 self.clients[account_name] = AsterDexClient(
@@ -173,20 +173,15 @@ class VolumeStatistics:
                 if account_name in token_data:
                     stats = token_data[account_name]
                     self.logger.info(f"  {account_name}:")
-                    self.logger.info(f"    交易笔数: {stats['total_trades']:>6} 笔")
+                    # self.logger.info(f"    交易笔数: {stats['total_trades']:>6} 笔")
                     self.logger.info(f"    总交易量: {stats['total_volume_usdt']:>10.2f} USDT")
-                    self.logger.info(f"    买入量:   {stats['buy_volume']:>10.2f} USDT")
-                    self.logger.info(f"    卖出量:   {stats['sell_volume']:>10.2f} USDT")
-                    self.logger.info(f"    净交易:   {stats['net_volume']:>10.2f} USDT")
-            
+
             # 打印代币总计
             self.logger.info(f"  {'总计':<12}:")
-            self.logger.info(f"    交易笔数: {total_data.get('total_trades', 0):>6} 笔")
+            # self.logger.info(f"    交易笔数: {total_data.get('total_trades', 0):>6} 笔")
             self.logger.info(f"    总交易量: {total_data.get('total_volume_usdt', 0):>10.2f} USDT")
-            self.logger.info(f"    买入量:   {total_data.get('buy_volume', 0):>10.2f} USDT")
-            self.logger.info(f"    卖出量:   {total_data.get('sell_volume', 0):>10.2f} USDT")
-            self.logger.info(f"    净交易:   {total_data.get('net_volume', 0):>10.2f} USDT")
-    
+
+
     def print_summary_statistics(self):
         """打印汇总统计"""
         self.logger.info("\n" + "="*80)
@@ -233,11 +228,11 @@ class VolumeStatistics:
         
         for account_name, totals in account_totals.items():
             self.logger.info(f"  {account_name}:")
-            self.logger.info(f"    总交易笔数: {totals['trades']:>6} 笔")
+            # self.logger.info(f"    总交易笔数: {totals['trades']:>6} 笔")
             self.logger.info(f"    总交易量:   {totals['volume']:>12.2f} USDT")
-            self.logger.info(f"    总买入量:   {totals['buy']:>12.2f} USDT")
-            self.logger.info(f"    总卖出量:   {totals['sell']:>12.2f} USDT")
-            self.logger.info(f"    净交易量:   {totals['buy'] - totals['sell']:>12.2f} USDT")
+            # self.logger.info(f"    总买入量:   {totals['buy']:>12.2f} USDT")
+            # self.logger.info(f"    总卖出量:   {totals['sell']:>12.2f} USDT")
+            # self.logger.info(f"    净交易量:   {totals['buy'] - totals['sell']:>12.2f} USDT")
         
         # 打印全局总计
         self.logger.info("\n🌐 全局总计:")
