@@ -1589,7 +1589,7 @@ class SmartMarketMaker:
                 side=side,
                 order_type="MARKET",
                 quantity=remaining_quantity,
-                newClientOrderId=f"{order_id}_c_{timestamp}"
+                newClientOrderId=f"{order_id}_com"
             )
             
             if 'orderId' not in market_order:
