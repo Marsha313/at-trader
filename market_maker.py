@@ -1422,6 +1422,275 @@ class SmartMarketMaker:
             self.update_cache_after_failure(pair)
         
         return success
+    def strategy_limit_both_improved(self, pair: TradingPairConfig) -> bool:
+        """改进的双边限价策略：更智能的订单管理和风险控制"""
+        self.logger.info(f"执行改进策略: {pair.symbol}双边限价对冲")
+        
+        try:
+            bid, ask, bid_qty, ask_qty = self.get_best_bid_ask(pair)
+            timestamp = int(time.time() * 1000)
+            
+            # 动态获取交易方向
+            sell_client_name, buy_client_name = self.get_current_trade_direction(pair)
+            sell_client = self.client1 if sell_client_name == 'ACCOUNT1' else self.client2
+            buy_client = self.client1 if buy_client_name == 'ACCOUNT1' else self.client2
+            
+            # 生成订单ID
+            sell_order_id = f"{sell_client_name.lower()[-2:-1]}_{pair.base_asset.lower()}_ls_{timestamp}"
+            buy_order_id = f"{buy_client_name.lower()[-2:-1]}_{pair.base_asset.lower()}_lb_{timestamp}"
+            
+            # 获取实际数量
+            sell_quantity, _ = self.get_sell_quantity(pair, sell_client_name)
+            if sell_quantity > 5000:
+                sell_quantity = 5000
+            buy_quantity = pair.fixed_buy_quantity
+            
+            # 设置更保守的价格
+            spread = ask - bid
+            sell_price = ask - (spread * 0.3)  # 更接近市场价格，提高成交概率
+            buy_price = bid + (spread * 0.3)
+            
+            # 确保价格合理
+            if sell_price <= bid:
+                sell_price = bid + 0.00001
+            if buy_price >= ask:
+                buy_price = ask - 0.00001
+            
+            self.logger.info(f"{pair.symbol}改进策略详情:")
+            self.logger.info(f"  {sell_client_name}卖出: {sell_quantity:.4f} @ {sell_price:.5f}")
+            self.logger.info(f"  {buy_client_name}买入: {buy_quantity:.4f} @ {buy_price:.5f}")
+            
+            # 1. 同时挂限价单
+            sell_order = sell_client.create_order(
+                symbol=pair.symbol,
+                side='SELL',
+                order_type='LIMIT',
+                quantity=sell_quantity,
+                price=sell_price,
+                newClientOrderId=sell_order_id
+            )
+            
+            if 'orderId' not in sell_order:
+                self.logger.error(f"{pair.symbol}限价卖单失败: {sell_order}")
+                return False
+            
+            buy_order = buy_client.create_order(
+                symbol=pair.symbol,
+                side='BUY',
+                order_type='LIMIT',
+                quantity=buy_quantity,
+                price=buy_price,
+                newClientOrderId=buy_order_id
+            )
+            
+            if 'orderId' not in buy_order:
+                self.logger.error(f"{pair.symbol}限价买单失败: {buy_order}")
+                sell_client.cancel_order(pair.symbol, origClientOrderId=sell_order_id)
+                return False
+            
+            self.logger.info(f"{pair.symbol}双边限价单已挂出")
+            
+            # 2. 改进的订单监控逻辑
+            start_time = time.time()
+            max_wait_time = 20  # 最大等待时间缩短为8秒
+            check_interval = 0.5
+            
+            while time.time() - start_time < max_wait_time:
+                # 获取订单状态
+                sell_status = sell_client.get_order(pair.symbol, origClientOrderId=sell_order_id)
+                buy_status = buy_client.get_order(pair.symbol, origClientOrderId=buy_order_id)
+                
+                sell_status_value = sell_status.get('status')
+                buy_status_value = buy_status.get('status')
+                
+                sell_executed = float(sell_status.get('executedQty', 0))
+                buy_executed = float(buy_status.get('executedQty', 0))
+                
+                # 情况1: 双方都完全成交 - 最佳情况
+                if sell_status_value == 'FILLED' and buy_status_value == 'FILLED':
+                    self.logger.info(f"🎉 {pair.symbol}双边限价单完全成交!")
+                    state = self.pair_states[pair.symbol]
+                    state['limit_both_success_count'] += 1
+                    return True
+                
+                # 情况2: 一方完全成交，另一方未成交 - 需要立即处理
+                elapsed_time = time.time() - start_time
+                min_wait_before_action = 2  # 至少等待2秒
+                
+                if elapsed_time > min_wait_before_action:
+                    # 卖单完全成交，买单未完全成交
+                    if sell_status_value == 'FILLED' and buy_status_value != 'FILLED':
+                        return self.handle_one_side_filled(
+                            pair, buy_client, buy_order_id, buy_quantity, buy_executed,
+                            'BUY', '买单', timestamp
+                        )
+                    
+                    # 买单完全成交，卖单未完全成交
+                    if buy_status_value == 'FILLED' and sell_status_value != 'FILLED':
+                        return self.handle_one_side_filled(
+                            pair, sell_client, sell_order_id, sell_quantity, sell_executed,
+                            'SELL', '卖单', timestamp
+                        )
+                
+                # 情况3: 双方都部分成交 - 继续等待或根据进度决定
+                if sell_executed > 0 and buy_executed > 0:
+                    sell_progress = (sell_executed / sell_quantity) * 100
+                    buy_progress = (buy_executed / buy_quantity) * 100
+                    
+                    # 如果双方进度都超过70%，继续等待
+                    if sell_progress > 70 and buy_progress > 70:
+                        self.logger.info(f"🔄 {pair.symbol}双方部分成交: 卖单{sell_progress:.1f}%, 买单{buy_progress:.1f}%, 继续等待...")
+                    # 如果一方进度远高于另一方，考虑干预
+                    elif abs(sell_progress - buy_progress) > 50 and elapsed_time > 5:
+                        self.logger.warning(f"⚠️ {pair.symbol}成交进度不平衡: 卖单{sell_progress:.1f}%, 买单{buy_progress:.1f}%")
+                        # 可以在这里添加平衡逻辑
+                    
+                time.sleep(check_interval)
+            
+            # 3. 超时处理
+            return self.handle_timeout_situation(
+                pair, sell_client, buy_client, sell_order_id, buy_order_id,
+                sell_quantity, buy_quantity, timestamp
+            )
+            
+        except Exception as e:
+            self.logger.error(f"{pair.symbol}改进策略执行出错: {e}")
+            # 安全取消所有订单
+            try:
+                self.client1.cancel_order(pair.symbol, origClientOrderId=sell_order_id)
+                self.client2.cancel_order(pair.symbol, origClientOrderId=buy_order_id)
+            except:
+                pass
+            return False
+
+    def handle_one_side_filled(self, pair: TradingPairConfig, client: AsterDexClient, 
+                            order_id: str, total_quantity: float, executed_quantity: float,
+                            side: str, side_name: str, timestamp: int) -> bool:
+        """处理单边成交的情况"""
+        self.logger.warning(f"⚠️ {pair.symbol}{side_name}已成交，但另一边未成交")
+        
+        try:
+            # 1. 立即取消未完成的限价单
+            cancel_result = client.cancel_order(pair.symbol, origClientOrderId=order_id)
+            if 'orderId' in cancel_result:
+                self.logger.info(f"✅ {pair.symbol}{side_name}剩余限价单已取消")
+            
+            # 2. 计算剩余数量
+            remaining_quantity = total_quantity - executed_quantity
+            self.logger.info(f"📊 {pair.symbol}{side_name}剩余数量: {remaining_quantity:.4f}")
+            
+            if remaining_quantity <= 0:
+                self.logger.info(f"✅ {pair.symbol}{side_name}已通过部分成交完成")
+                return True
+            
+            # 3. 执行补单
+            market_order = client.create_order(
+                symbol=pair.symbol,
+                side=side,
+                order_type="MARKET",
+                quantity=remaining_quantity,
+                newClientOrderId=f"{order_id}_c_{timestamp}"
+            )
+            
+            if 'orderId' not in market_order:
+                self.logger.error(f"❌ {pair.symbol}{side_name}补单失败: {market_order}")
+                return False
+            
+            self.logger.info(f"✅ {pair.symbol}{side_name}补单已提交")
+            
+            # 6. 等待补单成交
+            success = self.wait_for_orders_completion([(client, f"{order_id}_completion_{timestamp}")], pair.symbol)
+            
+            if success:
+                self.logger.info(f"✅ {pair.symbol}{side_name}补单成功")
+                state = self.pair_states[pair.symbol]
+                state['market_sell_success_count'] += 1
+                return True
+            else:
+                self.logger.error(f"❌ {pair.symbol}{side_name}补单失败")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"❌ {pair.symbol}处理{side_name}成交时出错: {e}")
+            return False
+
+    def handle_timeout_situation(self, pair: TradingPairConfig, sell_client: AsterDexClient, 
+                            buy_client: AsterDexClient, sell_order_id: str, buy_order_id: str,
+                            sell_quantity: float, buy_quantity: float, timestamp: int) -> bool:
+        """处理超时情况"""
+        self.logger.warning(f"⏰ {pair.symbol}双边限价单超时")
+        
+        try:
+            # 获取最终状态
+            final_sell_status = sell_client.get_order(pair.symbol, origClientOrderId=sell_order_id)
+            final_buy_status = buy_client.get_order(pair.symbol, origClientOrderId=buy_order_id)
+            
+            sell_executed = float(final_sell_status.get('executedQty', 0))
+            buy_executed = float(final_buy_status.get('executedQty', 0))
+            
+            # 取消所有未完成订单
+            if final_sell_status.get('status') != 'FILLED':
+                sell_client.cancel_order(pair.symbol, origClientOrderId=sell_order_id)
+            if final_buy_status.get('status') != 'FILLED':
+                buy_client.cancel_order(pair.symbol, origClientOrderId=buy_order_id)
+            
+            # 根据成交情况决定下一步
+            if sell_executed > 0 or buy_executed > 0:
+                self.logger.info(f"🔄 {pair.symbol}处理部分成交: 卖单{sell_executed:.4f}, 买单{buy_executed:.4f}")
+                
+                # 如果双方都有成交，但未完全成交
+                success = True
+                
+                # 补全卖单
+                if sell_executed < sell_quantity:
+                    remaining_sell = sell_quantity - sell_executed
+                    if remaining_sell > 0:
+                        sell_success = self.execute_market_order(
+                            sell_client, pair.symbol, 'SELL', remaining_sell, 
+                            f"{sell_order_id}_timeout_{timestamp}"
+                        )
+                        success = success and sell_success
+                
+                # 补全买单
+                if buy_executed < buy_quantity:
+                    remaining_buy = buy_quantity - buy_executed
+                    if remaining_buy > 0:
+                        buy_success = self.execute_market_order(
+                            buy_client, pair.symbol, 'BUY', remaining_buy,
+                            f"{buy_order_id}_timeout_{timestamp}"
+                        )
+                        success = success and buy_success
+                
+                return success
+            else:
+                self.logger.info(f"🔄 {pair.symbol}双方均未成交，转为市价对冲")
+                return self.strategy_market_only(pair)
+                
+        except Exception as e:
+            self.logger.error(f"❌ {pair.symbol}处理超时时出错: {e}")
+            return False
+
+    def execute_market_order(self, client: AsterDexClient, symbol: str, side: str, 
+                            quantity: float, order_id: str) -> bool:
+        """执行市价单并等待成交"""
+        try:
+            order = client.create_order(
+                symbol=symbol,
+                side=side,
+                order_type='MARKET',
+                quantity=quantity,
+                newClientOrderId=order_id
+            )
+            
+            if 'orderId' not in order:
+                self.logger.error(f"❌ {symbol}{side}市价单失败: {order}")
+                return False
+            
+            return self.wait_for_orders_completion([(client, order_id)], symbol)
+            
+        except Exception as e:
+            self.logger.error(f"❌ {symbol}{side}市价单执行出错: {e}")
+            return False
     def strategy_limit_both(self, pair: TradingPairConfig) -> bool:
         """策略1: 限价卖单 + 限价买单对冲，智能订单管理"""
         self.logger.info(f"执行策略1: {pair.symbol}限价单对冲")
