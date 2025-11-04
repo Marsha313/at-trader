@@ -1,1 +1,1 @@
-yum install python3 python3-pip -y && pip3 install python-dotenv requests matplotlib
+yum install python3 python3-pip -y && pip install -r requirements.txt
