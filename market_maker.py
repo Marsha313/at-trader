@@ -94,6 +94,7 @@ class TradingPairConfig:
     max_price_change: float = 0.005
     min_depth_multiplier: float = 2
     strategy: TradingStrategy = TradingStrategy.BOTH
+    min_price_increment: float = 0.0001  # 新增：最小价格变动单位
 
 @dataclass
 class HistoricalVolume:
@@ -241,7 +242,7 @@ class AsterDexClient:
         # 格式化价格（如果是限价单）
         formatted_price = None
         if price is not None and order_type != 'MARKET':
-            formatted_price = round(price,5)
+            formatted_price = round(price,4)
         
         params = {
             'symbol': symbol,
@@ -499,7 +500,7 @@ class SmartMarketMaker:
         self.aster_buy_failed = 0
 
     def load_trading_pairs_config(self) -> List[TradingPairConfig]:
-        """加载多交易对配置，支持每个交易对独立策略"""
+        """加载多交易对配置，支持每个交易对独立策略和最小价差"""
         pairs_config = []
         
         # 从环境变量读取交易对配置
@@ -514,6 +515,7 @@ class SmartMarketMaker:
             max_spread = float(os.getenv(f'{base_asset}_MAX_SPREAD', 0.002))
             max_price_change = float(os.getenv(f'{base_asset}_MAX_PRICE_CHANGE', 0.005))
             min_depth_multiplier = float(os.getenv(f'{base_asset}_MIN_DEPTH_MULTIPLIER', 2))
+            min_price_increment = float(os.getenv(f'{base_asset}_MIN_PRICE_INCREMENT', 0.0001))  # 新增
             
             # 读取交易对特定策略，如果没有则使用默认策略
             strategy_str = os.getenv(f'{base_asset}_STRATEGY', '').upper()
@@ -530,7 +532,8 @@ class SmartMarketMaker:
                 max_spread=max_spread,
                 max_price_change=max_price_change,
                 min_depth_multiplier=min_depth_multiplier,
-                strategy=strategy
+                strategy=strategy,
+                min_price_increment=min_price_increment  # 新增
             )
             pairs_config.append(pair_config)
             
@@ -540,6 +543,7 @@ class SmartMarketMaker:
             self.logger.info(f"   目标交易量: {target_volume}")
             self.logger.info(f"   最大价差: {max_spread:.4%}")
             self.logger.info(f"   最大价格波动: {max_price_change:.4%}")
+            self.logger.info(f"   最小价格变动单位: {min_price_increment}")
             self.logger.info(f"   交易策略: {strategy.value}")
         
         return pairs_config
@@ -642,7 +646,7 @@ class SmartMarketMaker:
                 best_ask = aster_order_book.asks[0][0]
                 
                 # 使用卖一价作为参考价格，但以买一价挂单（更可能成交）
-                buy_price = best_bid + 0.00001
+                buy_price = best_bid + 0.0001
                 
                 # 检查USDT余额是否足够
                 usdt_balance = client.get_asset_balance('USDT')
@@ -1077,22 +1081,22 @@ class SmartMarketMaker:
         bid, ask, bid_qty, ask_qty = self.get_best_bid_ask(pair)
         spread = self.calculate_spread_percentage(bid, ask)
         
-        # 高流动性标准
+        # 高流动性标准 - 使用交易对特定的最小价差
         high_liquidity = (
-            spread < 0.00005 and  # 价差小于0.1%
+            spread < pair.min_price_increment * 10 and  # 价差小于最小价差的10倍
             bid_qty > pair.fixed_buy_quantity * 10 and  # 深度充足
             ask_qty > pair.fixed_buy_quantity * 10
         )
         return high_liquidity
-    
+
     def should_use_market_strategy(self, pair: TradingPairConfig) -> bool:
         """判断是否应该使用市价策略"""
         bid, ask, bid_qty, ask_qty = self.get_best_bid_ask(pair)
         spread = self.calculate_spread_percentage(bid, ask)
         
-        # 低流动性特征
+        # 低流动性特征 - 使用交易对特定的最小价差
         low_liquidity = (
-            spread > 0.0002 or  # 价差大于0.5%
+            spread > pair.min_price_increment * 20 or  # 价差大于最小价差的20倍
             bid_qty < pair.fixed_buy_quantity * 2 or  # 深度不足
             ask_qty < pair.fixed_buy_quantity * 2
         )
@@ -1107,12 +1111,13 @@ class SmartMarketMaker:
         # 评估市场条件
         market_score = 0
         
-        # 价差评分（越小越好）
-        if spread < 0.00005:  # 0.1%
+        # 价差评分（越小越好）- 使用交易对特定的最小价差
+        min_spread_threshold = pair.min_price_increment * 5
+        if spread < min_spread_threshold:
             market_score += 3
-        elif spread < 0.0001:  # 0.2%
+        elif spread < min_spread_threshold * 2:
             market_score += 2
-        elif spread < 0.0002:  # 0.5%
+        elif spread < min_spread_threshold * 4:
             market_score += 1
         
         # 深度评分（越大越好）
@@ -1283,9 +1288,9 @@ class SmartMarketMaker:
             
             if use_limit_order and bid > 0 and ask > 0:
                 # 使用限价卖单
-                sell_price = ask - 0.00001
+                sell_price = ask - 0.0001
                 if sell_price <= bid:
-                    sell_price = bid + 0.00001
+                    sell_price = bid + 0.0001
                 
                 sell_order = sell_client.create_order(
                     symbol=pair.symbol,
@@ -1459,9 +1464,9 @@ class SmartMarketMaker:
             
             # 确保价格合理
             if sell_price <= bid:
-                sell_price = bid + 0.00001
+                sell_price = bid + 0.0001
             if buy_price >= ask:
-                buy_price = ask - 0.00001
+                buy_price = ask - 0.0001
             
             self.logger.info(f"{pair.symbol}改进策略详情:")
             self.logger.info(f"  {sell_client_name}卖出: {sell_quantity:.4f} @ {sell_price:.5f}")
@@ -1698,6 +1703,35 @@ class SmartMarketMaker:
         except Exception as e:
             self.logger.error(f"❌ {symbol}{side}市价单执行出错: {e}")
             return False
+        
+    def format_price(self, price: float, pair: TradingPairConfig) -> float:
+        """根据交易对的最小价格变动单位格式化价格"""
+        if pair.min_price_increment <= 0:
+            return round(price, 6)  # 默认精度
+        
+        # 根据最小价格变动单位进行四舍五入
+        precision = self.get_price_precision(pair.min_price_increment)
+        return round(price, precision)
+
+    def get_price_precision(self, min_increment: float) -> int:
+        """根据最小价格变动单位计算精度位数"""
+        if min_increment >= 1:
+            return 0
+        elif min_increment >= 0.1:
+            return 1
+        elif min_increment >= 0.01:
+            return 2
+        elif min_increment >= 0.001:
+            return 3
+        elif min_increment >= 0.0001:
+            return 4
+        elif min_increment >= 0.00001:
+            return 5
+        elif min_increment >= 0.000001:
+            return 6
+        else:
+            return 8  # 默认高精度
+        
     def strategy_limit_both(self, pair: TradingPairConfig) -> bool:
         """策略1: 限价卖单 + 限价买单对冲，智能订单管理"""
         self.logger.info(f"执行策略1: {pair.symbol}限价单对冲")
@@ -1724,20 +1758,24 @@ class SmartMarketMaker:
             # 买单数量：固定配置量
             buy_quantity = pair.fixed_buy_quantity
             
-            # 设置卖单价格为卖一价减0.00001（更优价格，更容易成交）
-            sell_price = ask - 0.00001
+            # 设置卖单价格为卖一价减去最小价格变动单位
+            sell_price = ask - pair.min_price_increment
             if sell_price <= bid:
-                sell_price = bid + 0.00001  # 确保卖价高于买一价
+                sell_price = bid + pair.min_price_increment  # 确保卖价高于买一价
             
-            # 设置买单价格为买一价加0.00001（更优价格，更容易成交）
-            buy_price = bid + 0.00001
+            # 设置买单价格为买一价加上最小价格变动单位
+            buy_price = bid + pair.min_price_increment
             if buy_price >= ask:
-                buy_price = ask - 0.00001  # 确保买价低于卖一价
+                buy_price = ask - pair.min_price_increment  # 确保买价低于卖一价
+
+             # 格式化价格
+            sell_price = self.format_price(sell_price, pair)
+            buy_price = self.format_price(buy_price, pair)
             
             self.logger.info(f"{pair.symbol}交易详情:")
-            self.logger.info(f"  {sell_client_name}卖出: {sell_quantity:.4f} @ {sell_price:.5f}")
-            self.logger.info(f"  {buy_client_name}买入: {buy_quantity:.4f} @ {buy_price:.5f}")
-            
+            self.logger.info(f"  {sell_client_name}卖出: {sell_quantity:.4f} @ {sell_price:.6f}")
+            self.logger.info(f"  {buy_client_name}买入: {buy_quantity:.4f} @ {buy_price:.6f}")
+            self.logger.info(f"  最小价格变动单位: {pair.min_price_increment}")
             # 同时挂限价单
             sell_order = sell_client.create_order(
                 symbol=pair.symbol,
@@ -2231,24 +2269,17 @@ class SmartMarketMaker:
         mid_price = (bid + ask) / 2
         
         # 卖单深度评估
-        sell_depth_score = 0
-        if ask_qty >= pair.fixed_buy_quantity * 3:
-            sell_depth_score += 2
-        elif ask_qty >= pair.fixed_buy_quantity * 1.5:
-            sell_depth_score += 1
+        sell_depth_score = ask_qty / pair.fixed_buy_quantity
+
         
         # 买单深度评估
-        buy_depth_score = 0
-        if bid_qty >= pair.fixed_buy_quantity * 3:
-            buy_depth_score += 2
-        elif bid_qty >= pair.fixed_buy_quantity * 1.5:
-            buy_depth_score += 1
+        buy_depth_score = bid_qty / pair.fixed_buy_quantity
         
         # 价差评估（越小越适合限价单）
         spread_score = 0
-        if spread < 0.0001:  # 0.1%
+        if spread < 0.001:  # 0.1%
             spread_score += 2
-        elif spread < 0.0002:  # 0.2%
+        elif spread < 0.0005:  # 0.2%
             spread_score += 1
         
         # 价格位置评估（相对位置）
@@ -2322,12 +2353,15 @@ class SmartMarketMaker:
             buy_quantity = pair.fixed_buy_quantity
             
             # 设置限价卖单价格
-            sell_price = ask - 0.0001
+            sell_price = ask - pair.min_price_increment
             if sell_price <= bid:
-                sell_price = bid + 0.0001
+                sell_price = bid + pair.min_price_increment
             
-            self.logger.info(f"{pair.symbol}交易详情: {sell_client_name}限价卖出={sell_quantity:.4f}@{sell_price:.5f}, {buy_client_name}市价买入={buy_quantity:.4f}")
+            # 格式化价格
+            sell_price = self.format_price(sell_price, pair)
             
+            self.logger.info(f"{pair.symbol}交易详情: {sell_client_name}限价卖出={sell_quantity:.4f}@{sell_price:.6f}, {buy_client_name}市价买入={buy_quantity:.4f}")
+            self.logger.info(f"  最小价格变动单位: {pair.min_price_increment}")
             # 记录限价卖单尝试
             state = self.pair_states[pair.symbol]
             state['limit_sell_attempt_count'] += 1
@@ -2395,12 +2429,15 @@ class SmartMarketMaker:
                 sell_quantity = 5000
             
             # 设置限价买单价格
-            buy_price = bid + 0.0001
+            buy_price = bid + pair.min_price_increment
             if buy_price >= ask:
-                buy_price = ask - 0.0001
+                buy_price = ask - pair.min_price_increment
             
-            self.logger.info(f"{pair.symbol}交易详情: {buy_client_name}限价买入={buy_quantity:.4f}@{buy_price:.5f}, {sell_client_name}市价卖出={sell_quantity:.4f}")
+            # 格式化价格
+            buy_price = self.format_price(buy_price, pair)
             
+            self.logger.info(f"{pair.symbol}交易详情: {buy_client_name}限价买入={buy_quantity:.4f}@{buy_price:.6f}, {sell_client_name}市价卖出={sell_quantity:.4f}")
+            self.logger.info(f"  最小价格变动单位: {pair.min_price_increment}")
             # 记录限价买单尝试
             state = self.pair_states[pair.symbol]
             state['limit_buy_attempt_count'] = state.get('limit_buy_attempt_count', 0) + 1
@@ -2778,6 +2815,7 @@ class SmartMarketMaker:
         for pair in self.trading_pairs:
             state = self.pair_states[pair.symbol]
             self.logger.info(f"\n   {pair.symbol}统计 (配置策略: {pair.strategy.value}):")
+            self.logger.info(f"     最小价格变动单位: {pair.min_price_increment}")
             self.logger.info(f"     总尝试次数: {state['trade_count']}")
             self.logger.info(f"     成功交易次数: {state['successful_trades']}")
             
