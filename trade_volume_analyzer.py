@@ -43,6 +43,14 @@ class TradeDataCache:
         """获取统计结果缓存文件路径"""
         return os.path.join(self.cache_dir, "volume_stats_cache.json")
     
+    def get_balance_cache_file(self, account_name: str) -> str:
+        """获取余额缓存文件路径"""
+        return os.path.join(self.cache_dir, f"{account_name}_balance.json")
+    
+    def get_price_cache_file(self) -> str:
+        """获取价格缓存文件路径"""
+        return os.path.join(self.cache_dir, "price_cache.json")
+    
     def load_cached_trades(self, account_name: str, symbol: str) -> List[Dict]:
         """从缓存加载交易记录"""
         cache_file = self.get_trades_cache_file(account_name, symbol)
@@ -111,6 +119,79 @@ class TradeDataCache:
         except Exception as e:
             logging.error(f"保存统计缓存失败: {e}")
     
+    def load_cached_balance(self, account_name: str) -> Dict:
+        """从缓存加载账户余额"""
+        cache_file = self.get_balance_cache_file(account_name)
+        
+        if not os.path.exists(cache_file):
+            return {}
+        
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get('balances', {})
+        except Exception as e:
+            logging.warning(f"加载余额缓存失败 {account_name}: {e}")
+            return {}
+    
+    def save_balance_to_cache(self, account_name: str, balances: Dict):
+        """保存账户余额到缓存"""
+        cache_file = self.get_balance_cache_file(account_name)
+        
+        try:
+            cache_data = {
+                'account_name': account_name,
+                'last_updated': datetime.now().isoformat(),
+                'balances': balances
+            }
+            
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, indent=2, ensure_ascii=False)
+            
+            logging.info(f"✅ 余额缓存保存成功: {account_name}")
+            
+        except Exception as e:
+            logging.error(f"保存余额缓存失败 {account_name}: {e}")
+    
+    def load_cached_prices(self) -> Dict:
+        """从缓存加载价格数据"""
+        cache_file = self.get_price_cache_file()
+        
+        if not os.path.exists(cache_file):
+            return {}
+        
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                # 检查缓存是否过期（5分钟）
+                last_updated = datetime.fromisoformat(data.get('last_updated', '2000-01-01'))
+                if (datetime.now() - last_updated).total_seconds() < 300:  # 5分钟
+                    return data.get('prices', {})
+                else:
+                    logging.info("价格缓存已过期，重新获取")
+                    return {}
+        except Exception as e:
+            logging.warning(f"加载价格缓存失败: {e}")
+            return {}
+    
+    def save_prices_to_cache(self, prices: Dict):
+        """保存价格数据到缓存"""
+        cache_file = self.get_price_cache_file()
+        
+        try:
+            cache_data = {
+                'last_updated': datetime.now().isoformat(),
+                'prices': prices
+            }
+            
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, indent=2, ensure_ascii=False)
+            
+            logging.info("✅ 价格缓存保存成功")
+            
+        except Exception as e:
+            logging.error(f"保存价格缓存失败: {e}")
+    
     def get_latest_trade_id(self, account_name: str, symbol: str) -> int:
         """获取缓存中最大的交易ID"""
         cached_trades = self.load_cached_trades(account_name, symbol)
@@ -154,8 +235,9 @@ class VolumeStatistics:
         # 初始化缓存
         self.cache = TradeDataCache()
         
-        # 初始化客户端
+        # 初始化客户端（使用第一个账户获取价格）
         self.clients = {}
+        self.price_client = None
         self.init_clients()
         
         # 配置要统计的代币
@@ -163,6 +245,8 @@ class VolumeStatistics:
         
         # 统计结果
         self.volume_stats = {}
+        self.balance_stats = {}
+        self.current_prices = {}
         
         # 缓存统计
         self.cache_stats = {
@@ -195,8 +279,69 @@ class VolumeStatistics:
                     api_key, secret_key, account_name
                 )
                 self.logger.info(f"✅ 初始化 {account_name} 客户端")
+                
+                # 使用第一个有效的客户端作为价格查询客户端
+                if self.price_client is None:
+                    self.price_client = self.clients[account_name]
             else:
                 self.logger.warning(f"⚠️ 无法初始化账户{i}，缺少API密钥")
+    
+    def get_current_prices(self) -> Dict:
+        """获取当前价格"""
+        self.logger.info("💰 获取当前代币价格...")
+        
+        # 从缓存加载价格
+        cached_prices = self.cache.load_cached_prices()
+        if cached_prices:
+            self.logger.info(f"📁 从缓存加载 {len(cached_prices)} 个代币价格")
+            return cached_prices
+        
+        prices = {}
+        
+        try:
+            # 获取所有交易对的最新价格
+            self.cache_stats['api_calls_made'] += 1
+            all_prices = self.price_client._request('GET', "/api/v1/ticker/price", {})
+            
+            if isinstance(all_prices, list):
+                for price_info in all_prices:
+                    symbol = price_info.get('symbol', '')
+                    price = float(price_info.get('price', 0))
+                    prices[symbol] = price
+                
+                self.logger.info(f"✅ 获取到 {len(prices)} 个交易对的最新价格")
+                
+                # 保存到缓存
+                self.cache.save_prices_to_cache(prices)
+            else:
+                self.logger.error(f"❌ 获取价格失败: {all_prices}")
+                
+        except Exception as e:
+            self.logger.error(f"❌ 获取价格时出错: {e}")
+        
+        return prices
+    
+    def get_symbol_price(self, symbol: str) -> float:
+        """获取指定交易对的价格"""
+        if symbol in self.current_prices:
+            return self.current_prices[symbol]
+        return 0.0
+    
+    def get_asset_price_in_usdt(self, asset: str) -> float:
+        """获取资产对应的USDT价格"""
+        if asset == 'USDT':
+            return 1.0
+        
+        # 尝试直接获取交易对价格
+        symbol = f"{asset}USDT"
+        price = self.get_symbol_price(symbol)
+        if price > 0:
+            return price
+        
+        # 如果直接交易对不存在，尝试通过其他方式估算
+        # 这里可以添加更多逻辑，比如通过BTC中转等
+        self.logger.warning(f"⚠️ 无法获取 {asset} 的USDT价格")
+        return 0.0
     
     def get_all_trades_with_pagination(self, client: AsterDexClient, token_symbol: str, from_id: int = None) -> List[Dict]:
         """分页获取所有交易记录（处理1000条限制）"""
@@ -302,6 +447,47 @@ class VolumeStatistics:
             self.cache_stats['api_calls_saved'] += 1
             return cached_trades
     
+    def get_account_balance(self, client: AsterDexClient) -> Dict:
+        """获取账户余额"""
+        account_name = client.account_name
+        
+        try:
+            # 从缓存加载余额
+            cached_balance = self.cache.load_cached_balance(account_name)
+            
+            # 获取最新余额
+            self.cache_stats['api_calls_made'] += 1
+            account_info = client._request('GET', "/api/v1/account", {}, signed=True)
+            
+            if not isinstance(account_info, dict) or 'balances' not in account_info:
+                self.logger.error(f"❌ 获取账户余额失败: {account_info}")
+                return cached_balance
+            
+            balances = {}
+            for balance in account_info['balances']:
+                asset = balance['asset']
+                free = float(balance.get('free', 0))
+                locked = float(balance.get('locked', 0))
+                total = free + locked
+                
+                # 只记录有余额的资产
+                if total > 0:
+                    balances[asset] = {
+                        'free': free,
+                        'locked': locked,
+                        'total': total
+                    }
+            
+            # 保存到缓存
+            self.cache.save_balance_to_cache(account_name, balances)
+            
+            self.logger.info(f"✅ 获取 {account_name} 余额成功")
+            return balances
+            
+        except Exception as e:
+            self.logger.error(f"❌ 获取 {account_name} 余额失败: {e}")
+            return cached_balance
+    
     def calculate_token_volume_for_account(self, client: AsterDexClient, token_symbol: str) -> Dict:
         """计算指定账户在指定代币上的交易量（使用缓存）"""
         self.logger.info(f"📊 计算 {client.account_name} 的 {token_symbol} 交易量...")
@@ -358,6 +544,27 @@ class VolumeStatistics:
             self.logger.info("📁 找到之前的统计缓存")
             return cached_stats['stats']
         return {}
+    
+    def get_all_account_balances(self):
+        """获取所有账户的余额"""
+        self.logger.info("\n💰 开始获取所有账户余额...")
+        
+        self.balance_stats = {}
+        total_balance = {}
+        
+        for account_name, client in self.clients.items():
+            self.logger.info(f"🔄 获取 {account_name} 余额...")
+            balances = self.get_account_balance(client)
+            self.balance_stats[account_name] = balances
+            
+            # 累加总余额
+            for asset, balance_info in balances.items():
+                if asset not in total_balance:
+                    total_balance[asset] = 0.0
+                total_balance[asset] += balance_info['total']
+        
+        # 保存总余额
+        self.balance_stats['TOTAL'] = total_balance
     
     def calculate_all_volumes(self):
         """计算所有账户所有代币的交易量（基于缓存数据）"""
@@ -447,6 +654,133 @@ class VolumeStatistics:
             self.logger.info(f"  {'总计':<12}:")
             self.logger.info(f"    总交易量: {total_data.get('total_volume_usdt', 0):>10.2f} USDT")
 
+    def print_combined_account_statistics(self):
+        """打印各账户的综合统计（余额和交易量在一起）"""
+        self.logger.info("\n" + "="*80)
+        self.logger.info("👥 各账户综合统计（余额 + 交易量）")
+        self.logger.info("="*80)
+        
+        # 提取所有跟踪的代币符号（去掉USDT后缀）
+        tracked_assets = set()
+        for token_symbol in self.tokens_to_track:
+            # 假设交易对格式为 XXXUSDT
+            if token_symbol.endswith('USDT'):
+                asset = token_symbol[:-4]  # 去掉USDT后缀
+                tracked_assets.add(asset)
+        tracked_assets.add('USDT')  # 总是包含USDT
+        
+        # 按账户统计总交易量
+        account_total_volume = {}
+        for account_name in self.clients.keys():
+            account_total_volume[account_name] = 0.0
+            for token_symbol in self.tokens_to_track:
+                token_data = self.volume_stats.get(token_symbol, {})
+                if account_name in token_data:
+                    account_total_volume[account_name] += token_data[account_name]['total_volume_usdt']
+        
+        # 计算各账户总资产价值
+        account_total_value = {}
+        for account_name in self.clients.keys():
+            balances = self.balance_stats.get(account_name, {})
+            total_value = 0.0
+            
+            for asset, balance_info in balances.items():
+                asset_total = balance_info['total']
+                if asset_total > 0:
+                    price = self.get_asset_price_in_usdt(asset)
+                    asset_value = asset_total * price
+                    total_value += asset_value
+            
+            account_total_value[account_name] = total_value
+        
+        # 打印各账户的综合信息
+        for account_name in self.clients.keys():
+            balances = self.balance_stats.get(account_name, {})
+            total_volume = account_total_volume.get(account_name, 0)
+            total_value = account_total_value.get(account_name, 0)
+            
+            # 如果账户既没有余额也没有交易量，跳过显示
+            if not balances and total_volume == 0:
+                continue
+                
+            self.logger.info(f"\n📊 {account_name}:")
+            self.logger.info("-" * 50)
+            
+            # 显示余额信息
+            if balances:
+                self.logger.info("  💰 余额:")
+                # 显示USDT余额
+                usdt_balance = balances.get('USDT', {}).get('total', 0)
+                if usdt_balance > 0:
+                    self.logger.info(f"    USDT: {usdt_balance:>12.4f} (≈ {usdt_balance:>8.2f} USDT)")
+                
+                # 显示跟踪的代币余额（如果大于0）
+                for asset in tracked_assets:
+                    if asset != 'USDT' and asset in balances:
+                        balance_info = balances[asset]
+                        total_balance = balance_info.get('total', 0)
+                        if total_balance > 0:
+                            free = balance_info.get('free', 0)
+                            locked = balance_info.get('locked', 0)
+                            price = self.get_asset_price_in_usdt(asset)
+                            asset_value = total_balance * price
+                            self.logger.info(f"    {asset}: {total_balance:>12.4f} (≈ {asset_value:>8.2f} USDT)")
+                
+                # 显示总资产价值
+                if total_value > 0:
+                    self.logger.info(f"    {'总资产':<8}: {'':>12} (≈ {total_value:>8.2f} USDT)")
+            
+            # 显示交易量信息
+            if total_volume > 0:
+                self.logger.info("  📈 交易量统计:")
+                self.logger.info(f"    总交易量: {total_volume:>12.2f} USDT")
+                
+                # 显示各代币交易量详情
+                for token_symbol in self.tokens_to_track:
+                    token_data = self.volume_stats.get(token_symbol, {})
+                    if account_name in token_data:
+                        stats = token_data[account_name]
+                        token_volume = stats['total_volume_usdt']
+                        if token_volume > 0:
+                            self.logger.info(f"    {token_symbol}: {token_volume:>12.2f} USDT")
+    
+    def print_total_balance_statistics(self):
+        """打印总余额统计"""
+        total_balances = self.balance_stats.get('TOTAL', {})
+        if total_balances:
+            self.logger.info("\n🌐 总余额统计:")
+            self.logger.info("-" * 50)
+            
+            # 提取所有跟踪的代币符号
+            tracked_assets = set()
+            for token_symbol in self.tokens_to_track:
+                if token_symbol.endswith('USDT'):
+                    asset = token_symbol[:-4]
+                    tracked_assets.add(asset)
+            tracked_assets.add('USDT')
+            
+            total_portfolio_value = 0.0
+            
+            # 显示USDT总余额
+            total_usdt = total_balances.get('USDT', 0)
+            if total_usdt > 0:
+                self.logger.info(f"  USDT: {total_usdt:>12.4f} (≈ {total_usdt:>8.2f} USDT)")
+                total_portfolio_value += total_usdt
+            
+            # 显示跟踪的代币总余额（如果大于0）
+            for asset in tracked_assets:
+                if asset != 'USDT' and asset in total_balances:
+                    total_balance = total_balances[asset]
+                    if total_balance > 0:
+                        price = self.get_asset_price_in_usdt(asset)
+                        asset_value = total_balance * price
+                        self.logger.info(f"  {asset}: {total_balance:>12.4f} (≈ {asset_value:>8.2f} USDT)")
+                        total_portfolio_value += asset_value
+            
+            # 显示总资产价值
+            if total_portfolio_value > 0:
+                self.logger.info(f"  {'总资产':<8}: {'':>12} (≈ {total_portfolio_value:>8.2f} USDT)")
+    
     def print_summary_statistics(self):
         """打印汇总统计"""
         self.logger.info("\n" + "="*80)
@@ -492,14 +826,17 @@ class VolumeStatistics:
         self.logger.info("-" * 50)
         
         for account_name, totals in account_totals.items():
-            self.logger.info(f"  {account_name}:")
-            self.logger.info(f"    总交易量:   {totals['volume']:>12.2f} USDT")
+            if totals['volume'] > 0:  # 只显示有交易量的账户
+                self.logger.info(f"  {account_name}:")
+                self.logger.info(f"    总交易量:   {totals['volume']:>12.2f} USDT")
         
         # 打印全局总计
         self.logger.info("\n🌐 全局总计:")
         self.logger.info("-" * 50)
-        self.logger.info(f"  总交易笔数: {global_total_trades:>6} 笔")
-        self.logger.info(f"  总交易量:   {global_total_volume:>12.2f} USDT")
+        if global_total_trades > 0:
+            self.logger.info(f"  总交易笔数: {global_total_trades:>6} 笔")
+        if global_total_volume > 0:
+            self.logger.info(f"  总交易量:   {global_total_volume:>12.2f} USDT")
         
         # 打印各代币占比
         self.logger.info("\n📊 各代币交易量占比:")
@@ -510,12 +847,13 @@ class VolumeStatistics:
             total_data = token_data.get('TOTAL', {})
             token_volume = total_data.get('total_volume_usdt', 0)
             
-            if global_total_volume > 0:
-                percentage = (token_volume / global_total_volume) * 100
-            else:
-                percentage = 0
-                
-            self.logger.info(f"  {token_symbol:<12}: {token_volume:>12.2f} USDT ({percentage:>5.1f}%)")
+            if token_volume > 0:  # 只显示有交易量的代币
+                if global_total_volume > 0:
+                    percentage = (token_volume / global_total_volume) * 100
+                else:
+                    percentage = 0
+                    
+                self.logger.info(f"  {token_symbol:<12}: {token_volume:>12.2f} USDT ({percentage:>5.1f}%)")
     
     def export_to_csv(self, filename: str = None):
         """导出统计结果到CSV文件"""
@@ -564,6 +902,27 @@ class VolumeStatistics:
                 
                 writer.writerow([])  # 空行
                 
+                # 写入余额统计
+                writer.writerow(['账户余额统计', '', '', '', '', '', ''])
+                for account_name in self.clients.keys():
+                    balances = self.balance_stats.get(account_name, {})
+                    if balances:
+                        writer.writerow([f'{account_name}余额', '', '', '', '', '', ''])
+                        for asset, balance_info in balances.items():
+                            price = self.get_asset_price_in_usdt(asset)
+                            asset_value = balance_info['total'] * price
+                            writer.writerow([
+                                asset,
+                                f"{balance_info['total']:.4f}",
+                                f"{balance_info['free']:.4f}",
+                                f"{balance_info['locked']:.4f}",
+                                f"{price:.4f}",
+                                f"{asset_value:.2f}",
+                                ''
+                            ])
+                
+                writer.writerow([])  # 空行
+                
                 # 全局总计
                 global_volume = sum(
                     data.get('TOTAL', {}).get('total_volume_usdt', 0) 
@@ -575,8 +934,10 @@ class VolumeStatistics:
                 )
                 
                 writer.writerow(['全局统计', '', '', '', '', '', ''])
-                writer.writerow(['总交易笔数', global_trades, '', '', '', '', ''])
-                writer.writerow(['总交易量(USDT)', f"{global_volume:.2f}", '', '', '', '', ''])
+                if global_trades > 0:
+                    writer.writerow(['总交易笔数', global_trades, '', '', '', '', ''])
+                if global_volume > 0:
+                    writer.writerow(['总交易量(USDT)', f"{global_volume:.2f}", '', '', '', '', ''])
                 
                 # 缓存统计
                 writer.writerow([])
@@ -618,6 +979,12 @@ class VolumeStatistics:
         self.logger.info("=" * 60)
         
         try:
+            # 获取当前价格
+            self.current_prices = self.get_current_prices()
+            
+            # 获取所有账户余额
+            self.get_all_account_balances()
+            
             # 计算所有交易量（基于缓存中的所有交易记录）
             self.calculate_all_volumes()
             
@@ -626,6 +993,12 @@ class VolumeStatistics:
             
             # 打印详细统计
             self.print_detailed_statistics()
+            
+            # 打印各账户综合统计（余额+交易量）
+            self.print_combined_account_statistics()
+            
+            # 打印总余额统计
+            self.print_total_balance_statistics()
             
             # 打印汇总统计
             self.print_summary_statistics()
