@@ -241,7 +241,7 @@ class AsterDexClient:
         # 格式化价格（如果是限价单）
         formatted_price = None
         if price is not None and order_type != 'MARKET':
-            formatted_price = round(price,5)
+            formatted_price = round(price,4)
         
         params = {
             'symbol': symbol,
@@ -638,7 +638,7 @@ class SmartMarketMaker:
                 best_ask = aster_order_book.asks[0][0]
                 
                 # 使用卖一价作为参考价格，但以买一价挂单（更可能成交）
-                buy_price = best_bid + 0.00001
+                buy_price = best_bid + 0.0001
                 
                 # 检查USDT余额是否足够
                 usdt_balance = client.get_asset_balance('USDT')
@@ -1279,9 +1279,9 @@ class SmartMarketMaker:
             
             if use_limit_order and bid > 0 and ask > 0:
                 # 使用限价卖单
-                sell_price = ask - 0.00001
+                sell_price = ask - 0.0001
                 if sell_price <= bid:
-                    sell_price = bid + 0.00001
+                    sell_price = bid + 0.0001
                 
                 sell_order = sell_client.create_order(
                     symbol=pair.symbol,
@@ -1455,9 +1455,9 @@ class SmartMarketMaker:
             
             # 确保价格合理
             if sell_price <= bid:
-                sell_price = bid + 0.00001
+                sell_price = bid + 0.0001
             if buy_price >= ask:
-                buy_price = ask - 0.00001
+                buy_price = ask - 0.0001
             
             self.logger.info(f"{pair.symbol}改进策略详情:")
             self.logger.info(f"  {sell_client_name}卖出: {sell_quantity:.4f} @ {sell_price:.5f}")
@@ -1720,15 +1720,15 @@ class SmartMarketMaker:
             # 买单数量：固定配置量
             buy_quantity = pair.fixed_buy_quantity
             
-            # 设置卖单价格为卖一价减0.00001（更优价格，更容易成交）
-            sell_price = ask - 0.00001
+            # 设置卖单价格为卖一价减0.0001（更优价格，更容易成交）
+            sell_price = ask - 0.0001
             if sell_price <= bid:
-                sell_price = bid + 0.00001  # 确保卖价高于买一价
+                sell_price = bid + 0.0001  # 确保卖价高于买一价
             
-            # 设置买单价格为买一价加0.00001（更优价格，更容易成交）
-            buy_price = bid + 0.00001
+            # 设置买单价格为买一价加0.0001（更优价格，更容易成交）
+            buy_price = bid + 0.0001
             if buy_price >= ask:
-                buy_price = ask - 0.00001  # 确保买价低于卖一价
+                buy_price = ask - 0.0001  # 确保买价低于卖一价
             
             self.logger.info(f"{pair.symbol}交易详情:")
             self.logger.info(f"  {sell_client_name}卖出: {sell_quantity:.4f} @ {sell_price:.5f}")
@@ -2208,10 +2208,10 @@ class SmartMarketMaker:
             # 买单数量：固定配置量
             buy_quantity = pair.fixed_buy_quantity
             
-            # 设置卖单价格为卖一价减0.00001
-            sell_price = ask - 0.00001
+            # 设置卖单价格为卖一价减0.0001
+            sell_price = ask - 0.0001
             if sell_price <= bid:
-                sell_price = bid + 0.00001  # 确保卖价高于买一价
+                sell_price = bid + 0.0001  # 确保卖价高于买一价
             
             self.logger.info(f"{pair.symbol}交易详情: {sell_client_name}卖出={sell_quantity:.4f}@{sell_price:.5f}, {buy_client_name}买入={buy_quantity:.4f}")
             
