@@ -14,14 +14,28 @@ from enum import Enum
 import logging
 import sys
 from datetime import datetime
+import argparse  # 新增：命令行参数解析
 
 # 设置日志
-def setup_logging():
-    """设置日志配置"""
+def setup_logging(config_name="default", log_filename=None):
+    """设置日志配置
+    
+    Args:
+        config_name: 配置名称，用于默认日志文件名
+        log_filename: 自定义日志文件名，如果为None则自动生成
+    """
     if not os.path.exists('logs'):
         os.makedirs('logs')
     
-    log_filename = f"logs/market_maker_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    if log_filename is None:
+        # 自动生成日志文件名
+        log_filename = f"logs/market_maker_{config_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    else:
+        # 使用自定义日志文件名
+        if not log_filename.startswith('logs/'):
+            log_filename = f"logs/{log_filename}"
+        if not log_filename.endswith('.log'):
+            log_filename += '.log'
     
     logging.basicConfig(
         level=logging.INFO,
@@ -32,9 +46,12 @@ def setup_logging():
         ]
     )
     
-    return logging.getLogger(__name__)
+    logger = logging.getLogger(__name__)
+    logger.info(f"📝 日志文件: {log_filename}")
+    
+    return logger
 
-# 初始化日志
+# 初始化日志（稍后会在main函数中重新配置）
 logger = setup_logging()
 
 # 加载环境变量
@@ -417,7 +434,26 @@ class AsterDexClient:
             return self.get_all_user_trades(symbol, start_time, end_time)
 
 class SmartMarketMaker:
-    def __init__(self):
+    def __init__(self, config_file: str = ".env", log_filename: str = None):
+        """
+        初始化做市商
+        
+        Args:
+            config_file: 配置文件路径，默认为.env
+            log_filename: 自定义日志文件名，如果为None则自动生成
+        """
+        # 加载指定配置文件
+        self.config_file = config_file
+        config_name = os.path.splitext(os.path.basename(config_file))[0]
+        
+        if os.path.exists(config_file):
+            load_dotenv(config_file)
+            self.logger = setup_logging(config_name, log_filename)
+            self.logger.info(f"📁 使用配置文件: {config_file}")
+        else:
+            self.logger = setup_logging("default", log_filename)
+            self.logger.warning(f"⚠️ 配置文件 {config_file} 不存在，使用默认配置")
+        
         # Aster代币配置
         self.aster_asset = 'ASTER'
         self.aster_symbol = 'ASTERUSDT'
@@ -445,9 +481,6 @@ class SmartMarketMaker:
             os.getenv('ACCOUNT2_SECRET_KEY'),
             'ACCOUNT2'
         )
-        
-        # 设置日志
-        self.logger = logging.getLogger(__name__)
         
         # 多交易对配置
         self.trading_pairs = self.load_trading_pairs_config()
@@ -2941,8 +2974,9 @@ class SmartMarketMaker:
     
     def start(self):
         """启动交易程序"""
+        config_name = os.path.splitext(os.path.basename(self.config_file))[0]
         self.logger.info("=" * 60)
-        self.logger.info("多交易对智能刷量交易程序启动")
+        self.logger.info(f"多交易对智能刷量交易程序启动 [配置: {config_name}]")
         self.logger.info(f"交易对数量: {len(self.trading_pairs)}")
         for i, pair in enumerate(self.trading_pairs):
             self.logger.info(f"  {i+1}. {pair.symbol} (目标: {pair.target_volume}, 数量: {pair.fixed_buy_quantity}, 策略: {pair.strategy.value})")
@@ -3013,7 +3047,33 @@ class SmartMarketMaker:
 
 def main():
     """主函数"""
-    maker = SmartMarketMaker()
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='多交易对智能刷量交易程序')
+    parser.add_argument('-c', '--config', type=str, default='.env.example', 
+                       help='配置文件路径 (默认: .env)')
+    parser.add_argument('-l', '--list-configs', action='store_true',
+                       help='列出可用的配置文件')
+    parser.add_argument('--log', type=str, metavar='FILENAME',
+                       help='自定义日志文件名 (不需要.log后缀)')
+    
+    args = parser.parse_args()
+    
+    # 列出可用配置文件
+    if args.list_configs:
+        config_files = [f for f in os.listdir('.') if f.endswith('.env')]
+        print("可用的配置文件:")
+        for config_file in config_files:
+            print(f"  - {config_file}")
+        return
+    
+    # 检查配置文件是否存在
+    if not os.path.exists(args.config):
+        print(f"错误: 配置文件 {args.config} 不存在")
+        print("使用 -l 参数查看可用的配置文件")
+        return
+    
+    # 创建做市商实例并启动
+    maker = SmartMarketMaker(config_file=args.config, log_filename=args.log)
     
     try:
         maker.start()

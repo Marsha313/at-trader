@@ -1,2 +1,4 @@
-.env
+*.env
 logs/
+trade_cache/
+volume_stats*
