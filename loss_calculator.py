@@ -131,7 +131,7 @@ class TradingLossCalculator:
             if price_symbol.endswith(asset) and price_symbol.startswith('USDT'):
                 return 1.0 / price if price > 0 else 0.0
         
-        self.logger.warning(f"⚠️ 无法获取 {asset} 的USDT价格")
+        # self.logger.warning(f"⚠️ 无法获取 {asset} 的USDT价格")
         return 0.0
     
     def load_csv_files(self, file1: str, file2: str):
@@ -297,8 +297,8 @@ class TradingLossCalculator:
             
             # 获取所有账户名称（两个文件的并集）
             all_accounts = set(balances1.keys()) | set(balances2.keys())
-            
-            for account in all_accounts:
+            sorted_accounts = sorted(all_accounts)
+            for account in sorted_accounts:
                 self.logger.info(f"\n🔍 分析账户: {account}")
                 
                 # 使用当前价格计算两个时间点的投资组合价值
@@ -367,7 +367,7 @@ class TradingLossCalculator:
                     qty1 = balances1.get(account, {}).get(asset, 0)
                     qty2 = balances2.get(account, {}).get(asset, 0)
                     price = self.get_asset_price_in_usdt(asset)
-                    if qty1 != qty2 or (qty1 > 0 and qty2 > 0):
+                    if (qty1 != qty2 or (qty1 > 0 and qty2 > 0)) and price > 0:
                         self.logger.info(f"     {asset}: {qty1:.4f} → {qty2:.4f} (价格: {price:.4f} USDT)")
             
             if not all_valid_accounts:
@@ -425,8 +425,10 @@ class TradingLossCalculator:
         
         self.logger.info(f"\n👥 各账户情况 (共 {len(all_valid_accounts)} 个有效账户，其中 {len(valid_accounts)} 个有交易活动):")
         self.logger.info("-" * 130)
-        self.logger.info(f"{'账户':<15} {'初始价值':>12} {'最终价值':>12} {'价值变化':>12} {'交易量变化':>12} {'交易损耗':>12} {'损耗率':>10} {'状态':>8}")
+        self.logger.info(f"{'账户':<15} {'初始价值':>7} {'最终价值':>7} {'价值变化':>9} {'交易量变化':>7} {'交易损耗':>7} {'损耗率':>7} {'状态':>8}")
         self.logger.info("-" * 130)
+
+        sorted_accounts.sort(key=lambda x: x[0])  # 按账户名称排序
         
         for account, data in sorted_accounts:
             if data['has_trading_activity']:
@@ -434,7 +436,7 @@ class TradingLossCalculator:
                 loss_rate_display = f"{data['loss_rate']:>9.3f}%"
             else:
                 status = "无交易"
-                loss_rate_display = "   -   "
+                loss_rate_display = "      -   "
             
             self.logger.info(
                 f"{account:<15} "

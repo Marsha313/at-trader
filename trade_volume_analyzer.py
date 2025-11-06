@@ -500,7 +500,7 @@ class VolumeStatistics:
             # 保存到缓存
             self.cache.save_balance_to_cache(account_name, balances)
             
-            self.logger.info(f"✅ 获取 {account_name} 余额成功")
+            # self.logger.info(f"✅ 获取 {account_name} 余额成功")
             return balances
             
         except Exception as e:
@@ -705,6 +705,7 @@ class VolumeStatistics:
                 asset = token_symbol[:-4]  # 去掉USDT后缀
                 tracked_assets.add(asset)
         tracked_assets.add('USDT')  # 总是包含USDT
+        tracked_assets.add('ASTER')  # 总是包含ASTER
         
         # 按账户统计总交易量
         account_total_volume = {}
