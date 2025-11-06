@@ -602,15 +602,18 @@ class SmartMarketMaker:
         symbols = [pair.symbol for pair in self.trading_pairs]
         self.logger.info(f"📋 需要清理的交易对: {', '.join(symbols)}")
         
-        # 为每个账户取消所有相关交易对的挂单
-        success1 = self.client1.cancel_all_orders()
-        success2 = self.client2.cancel_all_orders()
+        # # 为每个账户取消所有相关交易对的挂单
+        # success1 = self.client1.cancel_all_orders()
+        # success2 = self.client2.cancel_all_orders()
+
+        success1 = True
+        success2 = True
         
         # 同时取消特定交易对的挂单（双重保障）
         for symbol in symbols:
             self.logger.info(f"🔄 清理交易对 {symbol} 的挂单...")
-            self.client1.cancel_all_orders(symbol)
-            self.client2.cancel_all_orders(symbol)
+            success1 = success1 and self.client1.cancel_all_orders(symbol)
+            success2 = success2 and self.client2.cancel_all_orders(symbol)
         
         if success1 and success2:
             self.logger.info("✅ 所有挂单清理完成")
