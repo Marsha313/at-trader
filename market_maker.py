@@ -160,7 +160,7 @@ class AsterDexClient:
             return {'error': str(e),'text': getattr(e.response, 'text', '')}
     
     def create_order(self, symbol: str, side: str, order_type: str, 
-                    quantity: float, price: Optional[float] = None) -> Dict:
+                    quantity: float, min_price_increment:float,price: Optional[float] = None) -> Dict:
         """创建订单 - 使用服务器生成的订单ID"""
         endpoint = "/api/v1/order"
         
@@ -168,7 +168,12 @@ class AsterDexClient:
         
         formatted_price = None
         if price is not None and order_type != 'MARKET':
-            formatted_price = round(price, 4)
+            num_length = 0
+            change = min_price_increment
+            while change < 1:
+                num_length += 1
+                change = change * 10
+            formatted_price = round(price, num_length)
         
         params = {
             'symbol': symbol,
@@ -614,6 +619,7 @@ class SmartMarketMaker:
                     side='BUY',
                     order_type='LIMIT',
                     quantity=self.aster_buy_quantity,
+                    min_price_increment=0.00001,
                     price=buy_price
                 )
                 
@@ -801,7 +807,8 @@ class SmartMarketMaker:
                 symbol=pair.symbol,
                 side='BUY',
                 order_type='MARKET',
-                quantity=buy_quantity
+                quantity=buy_quantity,
+                min_price_increment=pair.min_price_increment
             )
             
             if 'orderId' not in buy_order:
@@ -1177,6 +1184,7 @@ class SmartMarketMaker:
                     side='SELL',
                     order_type='LIMIT',
                     quantity=sell_quantity,
+                    min_price_increment=pair.min_price_increment,
                     price=sell_price
                 )
                 
@@ -1197,7 +1205,8 @@ class SmartMarketMaker:
                         symbol=pair.symbol,
                         side='SELL',
                         order_type='MARKET',
-                        quantity=sell_quantity
+                        quantity=sell_quantity,
+                        min_price_increment=pair.min_price_increment
                     )
                     
                     if 'orderId' not in sell_order:
@@ -1211,7 +1220,8 @@ class SmartMarketMaker:
                     symbol=pair.symbol,
                     side='SELL',
                     order_type='MARKET',
-                    quantity=sell_quantity
+                    quantity=sell_quantity,
+                    min_price_increment=pair.min_price_increment
                 )
                 
                 if 'orderId' not in sell_order:
@@ -1298,6 +1308,7 @@ class SmartMarketMaker:
                                         side='BUY',
                                         order_type='LIMIT',
                                         quantity=buy_quantity - buy_executed_qty,
+                                        min_price_increment=pair.min_price_increment,
                                         price=new_buy_price
                                     )
                                     
@@ -1357,6 +1368,7 @@ class SmartMarketMaker:
                                             side='SELL',
                                             order_type='LIMIT',
                                             quantity=remaining_sell_qty,
+                                            min_price_increment=pair.min_price_increment,
                                             price=new_sell_price
                                         )
                                         if 'orderId' in sell_order:
@@ -1407,6 +1419,7 @@ class SmartMarketMaker:
                                 side='SELL',
                                 order_type='LIMIT',
                                 quantity=sell_quantity - sell_executed_qty,
+                                min_price_increment=pair.min_price_increment,
                                 price=new_sell_price
                             )
                             
@@ -1441,6 +1454,7 @@ class SmartMarketMaker:
                                 side='BUY',
                                 order_type='LIMIT',
                                 quantity=buy_quantity - buy_executed_qty,
+                                min_price_increment=pair.min_price_increment,
                                 price=new_buy_price
                             )
                             
@@ -1487,6 +1501,7 @@ class SmartMarketMaker:
                                         side='SELL',
                                         order_type='LIMIT',
                                         quantity=remaining_sell_qty,
+                                        min_price_increment=pair.min_price_increment,
                                         price=new_sell_price
                                     )
                                     if 'orderId' in sell_order:
@@ -1545,6 +1560,7 @@ class SmartMarketMaker:
                 side='SELL',
                 order_type='LIMIT',
                 quantity=sell_quantity,
+                min_price_increment=pair.min_price_increment,
                 price=sell_price
             )
             
@@ -1559,6 +1575,7 @@ class SmartMarketMaker:
                 side='BUY',
                 order_type='LIMIT',
                 quantity=buy_quantity,
+                min_price_increment=pair.min_price_increment,
                 price=buy_price
             )
             
@@ -1621,7 +1638,8 @@ class SmartMarketMaker:
                         symbol=pair.symbol,
                         side='SELL',
                         order_type='MARKET',
-                        quantity=remaining_sell_qty
+                        quantity=remaining_sell_qty,
+                        min_price_increment=pair.min_price_increment
                     )
                     if 'orderId' in market_sell:
                         self.logger.info(f"✅ 卖单市价单已提交")
@@ -1712,7 +1730,8 @@ class SmartMarketMaker:
                 symbol=pair.symbol,
                 side='SELL',
                 order_type='MARKET',
-                quantity=sell_quantity
+                quantity=sell_quantity,
+                min_price_increment=pair.min_price_increment
             )
             
             if 'orderId' not in sell_order:
@@ -1725,7 +1744,8 @@ class SmartMarketMaker:
                 symbol=pair.symbol,
                 side='BUY',
                 order_type='MARKET',
-                quantity=buy_quantity
+                quantity=buy_quantity,
+                min_price_increment=pair.min_price_increment
             )
             
             if 'orderId' not in buy_order:
