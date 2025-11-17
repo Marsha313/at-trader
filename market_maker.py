@@ -98,6 +98,7 @@ class TradingPairConfig:
     min_depth_multiplier: float = 2
     strategy: TradingStrategy = TradingStrategy.BOTH
     min_price_increment: float = 0.0001
+    min_5min_volume: float = 0.0  # 新增：最近5分钟最小成交量要求
 
 @dataclass
 class HistoricalVolume:
@@ -296,6 +297,22 @@ class AsterDexClient:
         
         return OrderBook(bids=bids, asks=asks, update_time=time.time())
     
+    def get_klines(self, symbol: str, interval: str = '1m', limit: int = 5) -> List[List]:
+        """获取K线数据"""
+        endpoint = "/api/v1/klines"
+        params = {
+            'symbol': symbol,
+            'interval': interval,
+            'limit': limit
+        }
+        data = self._request('GET', endpoint, params)
+        
+        if isinstance(data, list):
+            return data
+        else:
+            self.logger.error(f"获取K线数据失败: {data}")
+            return []
+    
     def get_account_balance(self, force_refresh: bool = False) -> Dict[str, AccountBalance]:
         """获取账户余额"""
         if self._balance_cache is not None and not force_refresh:
@@ -454,7 +471,9 @@ class SmartMarketMaker:
                 'limit_buy_attempt_count': 0,
                 'limit_buy_success_count': 0,
                 'partial_limit_buy_count': 0,
-                'market_buy_success_count': 0
+                'market_buy_success_count': 0,
+                'last_volume_check': 0,  # 新增：上次成交量检查时间
+                'current_5min_volume': 0.0  # 新增：当前5分钟成交量
             }
             
             self.historical_volumes[pair.symbol] = HistoricalVolume()
@@ -483,6 +502,7 @@ class SmartMarketMaker:
             max_price_change = float(os.getenv(f'{base_asset}_MAX_PRICE_CHANGE', 0.005))
             min_depth_multiplier = float(os.getenv(f'{base_asset}_MIN_DEPTH_MULTIPLIER', 2))
             min_price_increment = float(os.getenv(f'{base_asset}_MIN_PRICE_INCREMENT', 0.0001))
+            min_5min_volume = float(os.getenv(f'{base_asset}_MIN_5MIN_VOLUME', 0.0))  # 新增：5分钟最小成交量
             
             strategy_str = os.getenv(f'{base_asset}_STRATEGY', '').upper()
             if strategy_str and hasattr(TradingStrategy, strategy_str):
@@ -499,7 +519,8 @@ class SmartMarketMaker:
                 max_price_change=max_price_change,
                 min_depth_multiplier=min_depth_multiplier,
                 strategy=strategy,
-                min_price_increment=min_price_increment
+                min_price_increment=min_price_increment,
+                min_5min_volume=min_5min_volume  # 新增配置
             )
             pairs_config.append(pair_config)
             
@@ -511,6 +532,7 @@ class SmartMarketMaker:
             self.logger.info(f"   最大价格波动: {max_price_change:.4%}")
             self.logger.info(f"   最小价格变动单位: {min_price_increment}")
             self.logger.info(f"   交易策略: {strategy.value}")
+            self.logger.info(f"   5分钟最小成交量: {min_5min_volume}")  # 新增日志
         
         return pairs_config
 
@@ -548,6 +570,62 @@ class SmartMarketMaker:
             self.logger.warning("⚠️ 部分挂单清理可能失败，但程序将继续运行")
         
         time.sleep(2)
+
+    def get_5min_volume_from_klines(self, pair: TradingPairConfig) -> float:
+        """通过K线数据获取指定交易对最近5分钟的总成交量"""
+        try:
+            # 获取最近5根1分钟K线数据
+            klines_data = self.client1.get_klines(pair.symbol, interval='1m', limit=5)
+            
+            if not klines_data:
+                self.logger.warning(f"无法获取 {pair.symbol} 的K线数据")
+                return 0.0
+            
+            total_volume = 0.0
+            for kline in klines_data:
+                # K线数据格式: [开盘时间, 开盘价, 最高价, 最低价, 收盘价, 成交量, ...]
+                # 索引5是成交量
+                volume = float(kline[5])
+                total_volume += volume
+            
+            self.logger.debug(f"{pair.symbol} 最近5分钟K线成交量: {total_volume:.2f}")
+            return total_volume
+            
+        except Exception as e:
+            self.logger.error(f"获取 {pair.symbol} K线数据时出错: {e}")
+            return 0.0
+
+    def update_volume_data(self, pair: TradingPairConfig):
+        """更新成交量数据"""
+        current_time = time.time()
+        state = self.pair_states[pair.symbol]
+        
+        # 每分钟更新一次成交量数据，避免频繁调用API
+        if current_time - state.get('last_volume_check', 0) >= 60:
+            try:
+                new_volume = self.get_5min_volume_from_klines(pair)
+                state['current_5min_volume'] = new_volume
+                state['last_volume_check'] = current_time
+                
+                self.logger.debug(f"{pair.symbol} 5分钟成交量已更新: {new_volume:.2f}")
+                
+            except Exception as e:
+                self.logger.error(f"更新 {pair.symbol} 成交量数据时出错: {e}")
+                # 如果更新失败，使用上一次的值
+
+    def check_volume_requirement(self, pair: TradingPairConfig) -> bool:
+        """检查成交量要求是否满足"""
+        if pair.min_5min_volume <= 0:
+            return True  # 如果没有设置最小成交量要求，则直接返回True
+        
+        current_volume = self.pair_states[pair.symbol].get('current_5min_volume', 0.0)
+        
+        if current_volume >= pair.min_5min_volume:
+            self.logger.info(f"✅ {pair.symbol} 成交量要求满足: {current_volume:.2f} >= {pair.min_5min_volume:.2f}")
+            return True
+        else:
+            self.logger.info(f"⏳ {pair.symbol} 成交量不足: {current_volume:.2f} < {pair.min_5min_volume:.2f}")
+            return False
 
     def check_and_buy_aster_if_needed(self) -> bool:
         """检查并购买Aster代币（如果需要）"""
@@ -1097,6 +1175,11 @@ class SmartMarketMaker:
         if not self.check_and_buy_aster_if_needed():
             self.logger.error("❌ Aster余额检查失败，暂停交易")
             return False, "error"
+        
+        # 新增：检查成交量要求
+        if not self.check_volume_requirement(pair):
+            self.logger.info(f"⏳ {pair.symbol} 成交量不足，跳过交易")
+            return False, "volume_insufficient"
         
         at_balance1 = self.client1.get_asset_balance(pair.base_asset)
         at_balance2 = self.client2.get_asset_balance(pair.base_asset)
@@ -1813,6 +1896,10 @@ class SmartMarketMaker:
         market_ok, trade_mode = self.check_market_conditions(pair)
         
         if not market_ok:
+            if trade_mode == "volume_insufficient":
+                # 成交量不足时，只更新数据但不交易
+                self.update_volume_data(pair)
+                return False
             return False
         
         state = self.pair_states[pair.symbol]
@@ -1918,6 +2005,7 @@ class SmartMarketMaker:
             state = self.pair_states[pair.symbol]
             self.logger.info(f"\n   {pair.symbol}统计 (配置策略: {pair.strategy.value}):")
             self.logger.info(f"     最小价格变动单位: {pair.min_price_increment}")
+            self.logger.info(f"     5分钟最小成交量要求: {pair.min_5min_volume}")
             self.logger.info(f"     总尝试次数: {state['trade_count']}")
             self.logger.info(f"     成功交易次数: {state['successful_trades']}")
             
@@ -1992,6 +2080,7 @@ class SmartMarketMaker:
                 self.client2.cancel_all_orders(current_pair.symbol)
                 
                 self.update_order_book(current_pair)
+                self.update_volume_data(current_pair)  # 新增：更新成交量数据
                 
                 if self.execute_trading_cycle(current_pair):
                     consecutive_failures = 0
@@ -2017,7 +2106,12 @@ class SmartMarketMaker:
                 current_state = self.pair_states[current_pair.symbol]
                 progress = current_state['volume'] / current_pair.target_volume * 100
                 success_rate = (current_state['successful_trades'] / current_state['trade_count'] * 100) if current_state['trade_count'] > 0 else 0
-                self.logger.info(f"{current_pair.symbol}进度: {progress:.1f}% ({current_state['volume']:.2f}/{current_pair.target_volume}), 成功率: {success_rate:.1f}%, 策略: {current_pair.strategy.value}")
+                
+                # 显示当前5分钟成交量
+                current_5min_volume = current_state.get('current_5min_volume', 0.0)
+                volume_status = f", 5分钟成交量: {current_5min_volume:.2f}/{current_pair.min_5min_volume:.2f}" if current_pair.min_5min_volume > 0 else ""
+                
+                self.logger.info(f"{current_pair.symbol}进度: {progress:.1f}% ({current_state['volume']:.2f}/{current_pair.target_volume}), 成功率: {success_rate:.1f}%, 策略: {current_pair.strategy.value}{volume_status}")
                 
                 time.sleep(self.check_interval)
                 self.switch_to_next_pair()
@@ -2036,7 +2130,8 @@ class SmartMarketMaker:
         self.logger.info(f"多交易对智能刷量交易程序启动 [配置: {config_name}]")
         self.logger.info(f"交易对数量: {len(self.trading_pairs)}")
         for i, pair in enumerate(self.trading_pairs):
-            self.logger.info(f"  {i+1}. {pair.symbol} (目标: {pair.target_volume}, 数量: {pair.fixed_buy_quantity}, 策略: {pair.strategy.value})")
+            volume_info = f", 5分钟最小成交量: {pair.min_5min_volume}" if pair.min_5min_volume > 0 else ""
+            self.logger.info(f"  {i+1}. {pair.symbol} (目标: {pair.target_volume}, 数量: {pair.fixed_buy_quantity}, 策略: {pair.strategy.value}{volume_info})")
         self.logger.info(f"Aster代币: {self.aster_asset}")
         self.logger.info(f"最低Aster余额: {self.min_aster_balance}")
         self.logger.info(f"默认策略: {self.default_strategy.value}")
@@ -2054,6 +2149,14 @@ class SmartMarketMaker:
         
         self.logger.info("✅ 缓存数据初始化完成")
 
+        # 初始化成交量数据
+        self.logger.info("🔄 初始化成交量数据...")
+        for pair in self.trading_pairs:
+            if pair.min_5min_volume > 0:
+                initial_volume = self.get_5min_volume_from_klines(pair)
+                self.pair_states[pair.symbol]['current_5min_volume'] = initial_volume
+                self.logger.info(f"   {pair.symbol} 初始5分钟成交量: {initial_volume:.2f}")
+        
         for pair in self.trading_pairs:
             self.logger.info(f"\n🔍 检查{pair.base_asset}余额状态...")
             if not self.initialize_at_balance(pair):

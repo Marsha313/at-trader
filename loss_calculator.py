@@ -433,7 +433,7 @@ class TradingLossCalculator:
         for account, data in sorted_accounts:
             if data['has_trading_activity']:
                 status = "交易中"
-                loss_rate_display = f"{data['loss_rate']:>9.3f}%"
+                loss_rate_display = f"{data['loss_rate']:>9.4f}%"
             else:
                 status = "无交易"
                 loss_rate_display = "      -   "
@@ -444,7 +444,7 @@ class TradingLossCalculator:
                 f"{data['portfolio_value2']:>12.2f} "
                 f"{data['portfolio_change']:>+12.2f} "
                 f"{data['volume_change']:>12.2f} "
-                f"{data['loss']:>12.2f} "
+                f"{data['loss']:>12.4f} "
                 f"{loss_rate_display} "
                 f"{status:>8}"
             )
@@ -461,8 +461,8 @@ class TradingLossCalculator:
                         f"{total_portfolio_value2:>12.2f} "
                         f"{(total_portfolio_value2 - total_portfolio_value1):>+12.2f} "
                         f"{total_volume_change:>12.2f} "
-                        f"{total_loss:>12.2f} "
-                        f"{total_loss_rate:>9.3f}% "
+                        f"{total_loss:>12.4f} "
+                        f"{total_loss_rate:>9.4f}% "
                         f"{'':>8}")
         
         # 打印分析总结
