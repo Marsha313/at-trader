@@ -466,6 +466,7 @@ class SmartMarketMaker:
                 'limit_sell_attempt_count': 0,
                 'partial_limit_sell_count': 0,
                 'limit_both_success_count': 0,
+                'limit_market_success_count': 0,  # 新增
                 'volume': 0,
                 'current_strategy': pair.strategy,
                 'limit_buy_attempt_count': 0,
@@ -480,7 +481,7 @@ class SmartMarketMaker:
             self.strategy_performance[pair.symbol] = {
                 TradingStrategy.LIMIT_BOTH: StrategyPerformance(TradingStrategy.LIMIT_BOTH),
                 TradingStrategy.MARKET_ONLY: StrategyPerformance(TradingStrategy.MARKET_ONLY),
-                TradingStrategy.LIMIT_MARKET: StrategyPerformance(TradingStrategy.LIMIT_MARKET)
+                TradingStrategy.LIMIT_MARKET: StrategyPerformance(TradingStrategy.LIMIT_MARKET)  # 新增
             }
         
         self.aster_buy_attempts = 0
@@ -1600,6 +1601,7 @@ class SmartMarketMaker:
         # 监控超时，返回当前状态
         self.logger.info(f"⏰ {pair.symbol}监控超时，当前状态: 卖单成交={sell_filled}, 买单成交={buy_filled}")
         return sell_filled, buy_filled, current_sell_price, current_buy_price, sell_executed_qty, buy_executed_qty
+
     def strategy_limit_both(self, pair: TradingPairConfig) -> bool:
         """策略1: 限价卖单 + 限价买单对冲，智能订单管理"""
         self.logger.info(f"执行策略1: {pair.symbol}限价单对冲")
@@ -1758,6 +1760,271 @@ class SmartMarketMaker:
         except Exception as e:
             self.logger.error(f"{pair.symbol}策略1执行出错: {e}")
             try:
+                self.client1.cancel_all_orders(pair.symbol)
+                self.client2.cancel_all_orders(pair.symbol)
+            except:
+                pass
+            return False
+
+    def strategy_limit_market(self, pair: TradingPairConfig) -> bool:
+        """策略3: 限价单 + 市价单对冲，先挂限价单，市价成交后检查限价单"""
+        self.logger.info(f"执行策略3: {pair.symbol}限价+市价对冲")
+        
+        try:
+            # 更新订单簿获取最新市场数据
+            self.update_order_book(pair)
+            
+            # 获取市场数据
+            bid, ask, _, _ = self.get_best_bid_ask(pair)
+            
+            # 动态获取交易方向
+            sell_client_name, buy_client_name = self.get_current_trade_direction(pair)
+            sell_client = self.client1 if sell_client_name == 'ACCOUNT1' else self.client2
+            buy_client = self.client1 if buy_client_name == 'ACCOUNT1' else self.client2
+            
+            # 获取实际数量
+            sell_quantity, _ = self.get_sell_quantity(pair, sell_client_name)
+            if sell_quantity > 5000:
+                sell_quantity = 5000
+            buy_quantity = pair.fixed_buy_quantity
+            
+            # 决定哪边用限价单，哪边用市价单
+            # 默认：卖出用限价单（获取更好价格），买入用市价单（确保成交）
+            use_limit_for_sell = True
+            use_limit_for_buy = False
+            
+            # 设置限价单价格
+            limit_price = 0
+            if use_limit_for_sell:
+                limit_price = self.format_price(ask - pair.min_price_increment, pair)
+                if limit_price <= bid:
+                    limit_price = self.format_price(bid + pair.min_price_increment, pair)
+            else:
+                limit_price = self.format_price(bid + pair.min_price_increment, pair)
+                if limit_price >= ask:
+                    limit_price = self.format_price(ask - pair.min_price_increment, pair)
+            
+            self.logger.info(f"{pair.symbol}交易详情:")
+            if use_limit_for_sell:
+                self.logger.info(f"  {sell_client_name}限价卖出: {sell_quantity:.4f} @ {limit_price:.6f}")
+                self.logger.info(f"  {buy_client_name}市价买入: {buy_quantity:.4f}")
+            else:
+                self.logger.info(f"  {sell_client_name}市价卖出: {sell_quantity:.4f}")
+                self.logger.info(f"  {buy_client_name}限价买入: {buy_quantity:.4f} @ {limit_price:.6f}")
+            self.logger.info(f"  当前市场: 买一={bid:.6f}, 卖一={ask:.6f}")
+            
+            # 先挂限价单
+            limit_order_id = None
+            limit_client = None
+            market_order_id = None
+            market_client = None
+            
+            if use_limit_for_sell:
+                # 挂限价卖单
+                limit_order = sell_client.create_order(
+                    symbol=pair.symbol,
+                    side='SELL',
+                    order_type='LIMIT',
+                    quantity=sell_quantity,
+                    min_price_increment=pair.min_price_increment,
+                    price=limit_price
+                )
+                
+                if 'orderId' not in limit_order:
+                    self.logger.error(f"{pair.symbol}限价卖单失败: {limit_order}")
+                    return False
+                
+                limit_order_id = limit_order['orderId']
+                limit_client = sell_client
+                self.logger.info(f"✅ 限价卖单已挂出: ID={limit_order_id}, 价格={limit_price:.6f}")
+                
+                # 等待片刻让限价单进入订单簿
+                time.sleep(0.5)
+                
+                # 挂市价买单
+                market_order = buy_client.create_order(
+                    symbol=pair.symbol,
+                    side='BUY',
+                    order_type='MARKET',
+                    quantity=buy_quantity,
+                    min_price_increment=pair.min_price_increment
+                )
+                
+                if 'orderId' not in market_order:
+                    self.logger.error(f"{pair.symbol}市价买单失败: {market_order}")
+                    sell_client.cancel_order(pair.symbol, limit_order_id)
+                    return False
+                
+                market_order_id = market_order['orderId']
+                market_client = buy_client
+                self.logger.info(f"✅ 市价买单已提交: ID={market_order_id}")
+                
+            else:
+                # 挂限价买单
+                limit_order = buy_client.create_order(
+                    symbol=pair.symbol,
+                    side='BUY',
+                    order_type='LIMIT',
+                    quantity=buy_quantity,
+                    min_price_increment=pair.min_price_increment,
+                    price=limit_price
+                )
+                
+                if 'orderId' not in limit_order:
+                    self.logger.error(f"{pair.symbol}限价买单失败: {limit_order}")
+                    return False
+                
+                limit_order_id = limit_order['orderId']
+                limit_client = buy_client
+                self.logger.info(f"✅ 限价买单已挂出: ID={limit_order_id}, 价格={limit_price:.6f}")
+                
+                # 等待片刻让限价单进入订单簿
+                time.sleep(0.5)
+                
+                # 挂市价卖单
+                market_order = sell_client.create_order(
+                    symbol=pair.symbol,
+                    side='SELL',
+                    order_type='MARKET',
+                    quantity=sell_quantity,
+                    min_price_increment=pair.min_price_increment
+                )
+                
+                if 'orderId' not in market_order:
+                    self.logger.error(f"{pair.symbol}市价卖单失败: {market_order}")
+                    buy_client.cancel_order(pair.symbol, limit_order_id)
+                    return False
+                
+                market_order_id = market_order['orderId']
+                market_client = sell_client
+                self.logger.info(f"✅ 市价卖单已提交: ID={market_order_id}")
+            
+            # 等待市价单成交
+            self.logger.info("🔄 等待市价单成交...")
+            market_success = self.wait_for_orders_completion([(market_client, market_order_id)], pair.symbol)
+            
+            if not market_success:
+                self.logger.error(f"❌ 市价单未成交，取消限价单")
+                limit_client.cancel_order(pair.symbol, limit_order_id)
+                return False
+            
+            self.logger.info("✅ 市价单已成交，检查限价单状态...")
+            
+            # 检查限价单状态
+            limit_order_status = limit_client.get_order(pair.symbol, limit_order_id)
+            limit_status = limit_order_status.get('status')
+            limit_executed_qty = float(limit_order_status.get('executedQty', 0))
+            
+            if limit_status == 'FILLED':
+                self.logger.info("✅ 限价单已完全成交，对冲交易完成!")
+                state = self.pair_states[pair.symbol]
+                state['limit_market_success_count'] = state.get('limit_market_success_count', 0) + 1
+                return True
+            elif limit_status == 'PARTIALLY_FILLED':
+                self.logger.info(f"🔄 限价单部分成交: {limit_executed_qty:.4f}/{sell_quantity if use_limit_for_sell else buy_quantity:.4f}")
+                
+                # 取消剩余部分并转为市价单
+                cancel_result = limit_client.cancel_order(pair.symbol, limit_order_id)
+                
+                if 'orderId' in cancel_result or cancel_result.get('status') == 'FILLED':
+                    remaining_qty = (sell_quantity if use_limit_for_sell else buy_quantity) - limit_executed_qty
+                    
+                    if remaining_qty > 0:
+                        self.logger.info(f"🔄 限价单剩余 {remaining_qty:.4f} 转为市价单")
+                        
+                        if use_limit_for_sell:
+                            # 剩余卖单转为市价
+                            market_sell = sell_client.create_order(
+                                symbol=pair.symbol,
+                                side='SELL',
+                                order_type='MARKET',
+                                quantity=remaining_qty,
+                                min_price_increment=pair.min_price_increment
+                            )
+                        else:
+                            # 剩余买单转为市价
+                            market_buy = buy_client.create_order(
+                                symbol=pair.symbol,
+                                side='BUY',
+                                order_type='MARKET',
+                                quantity=remaining_qty,
+                                min_price_increment=pair.min_price_increment
+                            )
+                        
+                        if 'orderId' in (market_sell if use_limit_for_sell else market_buy):
+                            self.logger.info("✅ 剩余数量市价单已提交")
+                            # 等待市价单成交
+                            success = self.wait_for_orders_completion([
+                                (sell_client if use_limit_for_sell else buy_client, 
+                                 market_sell['orderId'] if use_limit_for_sell else market_buy['orderId'])
+                            ], pair.symbol)
+                            
+                            if success:
+                                state = self.pair_states[pair.symbol]
+                                state['limit_market_success_count'] = state.get('limit_market_success_count', 0) + 1
+                                return True
+                        else:
+                            self.logger.error("❌ 剩余数量市价单失败")
+                            return False
+                else:
+                    self.logger.error("❌ 取消限价单失败")
+                    return False
+            else:
+                # 限价单未成交，转为市价单
+                self.logger.info("🔄 限价单未成交，转为市价单")
+                
+                cancel_result = limit_client.cancel_order(pair.symbol, limit_order_id)
+                
+                if 'orderId' in cancel_result or cancel_result.get('status') == 'FILLED':
+                    if cancel_result.get('status') == 'FILLED':
+                        self.logger.info("✅ 取消时发现限价单已成交")
+                        state = self.pair_states[pair.symbol]
+                        state['limit_market_success_count'] = state.get('limit_market_success_count', 0) + 1
+                        return True
+                    
+                    # 挂市价单完成剩余交易
+                    if use_limit_for_sell:
+                        market_sell = sell_client.create_order(
+                            symbol=pair.symbol,
+                            side='SELL',
+                            order_type='MARKET',
+                            quantity=sell_quantity,
+                            min_price_increment=pair.min_price_increment
+                        )
+                    else:
+                        market_buy = buy_client.create_order(
+                            symbol=pair.symbol,
+                            side='BUY',
+                            order_type='MARKET',
+                            quantity=buy_quantity,
+                            min_price_increment=pair.min_price_increment
+                        )
+                    
+                    if 'orderId' in (market_sell if use_limit_for_sell else market_buy):
+                        self.logger.info("✅ 限价单转为市价单已提交")
+                        # 等待市价单成交
+                        success = self.wait_for_orders_completion([
+                            (sell_client if use_limit_for_sell else buy_client, 
+                             market_sell['orderId'] if use_limit_for_sell else market_buy['orderId'])
+                        ], pair.symbol)
+                        
+                        if success:
+                            state = self.pair_states[pair.symbol]
+                            state['limit_market_success_count'] = state.get('limit_market_success_count', 0) + 1
+                            return True
+                    else:
+                        self.logger.error("❌ 限价单转为市价单失败")
+                        return False
+                else:
+                    self.logger.error("❌ 取消限价单失败")
+                    return False
+            
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"{pair.symbol}策略3执行出错: {e}")
+            try:
+                # 尝试取消所有挂单
                 self.client1.cancel_all_orders(pair.symbol)
                 self.client2.cancel_all_orders(pair.symbol)
             except:
@@ -1922,11 +2189,11 @@ class SmartMarketMaker:
             elif actual_strategy == TradingStrategy.MARKET_ONLY:
                 success = self.strategy_market_only(pair)
             elif actual_strategy == TradingStrategy.LIMIT_MARKET:
-                success = self.strategy_limit_both(pair)
+                success = self.strategy_limit_market(pair)  # 新增策略调用
                 if not success:
+                    self.logger.info(f"🔄 {pair.symbol}LIMIT_MARKET策略失败，尝试备用方案")
+                    # 备用方案：直接使用市价对冲
                     success = self.strategy_market_only(pair)
-                    if not success:
-                        success = self.strategy_limit_both(pair)
         
         execution_time = time.time() - start_time
         
@@ -2023,6 +2290,7 @@ class SmartMarketMaker:
             
             self.logger.info(f"     卖单市价单成功次数: {state['market_sell_success_count']}")
             self.logger.info(f"     限价双方策略成功次数: {state.get('limit_both_success_count', 0)}")
+            self.logger.info(f"     限价市价策略成功次数: {state.get('limit_market_success_count', 0)}")  # 新增
             self.logger.info(f"     累计交易量: {state['volume']:.2f}/{pair.target_volume}")
         
         self.logger.info(f"\n   Aster购买统计:")
