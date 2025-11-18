@@ -313,6 +313,40 @@ class CleanupMode:
         
         return pairs_config
 
+    def filter_trading_pairs(self, specified_tokens: List[str]) -> List[Dict]:
+        """根据指定的代币过滤交易对"""
+        if not specified_tokens:
+            return self.trading_pairs
+        
+        filtered_pairs = []
+        for token in specified_tokens:
+            token_upper = token.upper()
+            # 检查是否包含USDT后缀
+            if not token_upper.endswith('USDT'):
+                token_upper += 'USDT'
+            
+            # 查找匹配的交易对
+            matched = False
+            for pair in self.trading_pairs:
+                if pair['symbol'] == token_upper or pair['base_asset'].upper() == token.upper():
+                    filtered_pairs.append(pair)
+                    matched = True
+                    self.logger.info(f"✅ 找到匹配的交易对: {pair['symbol']}")
+                    break
+            
+            if not matched:
+                self.logger.warning(f"⚠️ 未找到代币 {token} 的配置，将使用默认配置创建")
+                # 为未配置的代币创建默认配置
+                default_pair = {
+                    'symbol': token_upper,
+                    'base_asset': token.upper().replace('USDT', ''),
+                    'min_price_increment': 0.0001  # 默认最小价格变动
+                }
+                filtered_pairs.append(default_pair)
+                self.logger.info(f"📋 为 {token} 创建默认配置")
+        
+        return filtered_pairs
+
     def format_price(self, price: float, min_increment: float) -> float:
         """根据最小价格变动单位格式化价格"""
         if min_increment <= 0:
@@ -340,11 +374,12 @@ class CleanupMode:
         else:
             return 8
 
-    def cancel_all_open_orders(self):
-        """取消所有相关交易对的挂单"""
-        self.logger.info("🔄 开始取消所有相关交易对的挂单...")
+    def cancel_all_open_orders(self, specified_pairs: List[Dict] = None):
+        """取消指定交易对的挂单"""
+        pairs_to_cancel = specified_pairs if specified_pairs else self.trading_pairs
+        symbols = [pair['symbol'] for pair in pairs_to_cancel]
         
-        symbols = [pair['symbol'] for pair in self.trading_pairs]
+        self.logger.info("🔄 开始取消相关交易对的挂单...")
         self.logger.info(f"📋 需要清理的交易对: {', '.join(symbols)}")
         
         success1 = True
@@ -391,13 +426,13 @@ class CleanupMode:
             self.logger.error(f"❌ 获取 {pair['symbol']} 市场数据失败: {e}")
             return None
 
-    def create_limit_sell_orders(self, custom_price: float = None) -> List[Dict]:
+    def create_limit_sell_orders(self, specified_pairs: List[Dict], custom_price: float = None) -> List[Dict]:
         """创建限价卖单，返回订单信息列表"""
         self.logger.info("🔄 开始创建限价卖单...")
         
         orders_to_monitor = []
         
-        for pair in self.trading_pairs:
+        for pair in specified_pairs:
             self.logger.info(f"\n📊 处理交易对: {pair['symbol']}")
             
             # 获取卖出价格
@@ -654,18 +689,21 @@ class CleanupMode:
             for order in failed_orders:
                 self.logger.info(f"   {order['client_name']} - {order['symbol']}: {order['status']}")
 
-    def show_open_orders(self):
+    def show_open_orders(self, specified_pairs: List[Dict] = None):
         """显示当前挂单"""
+        pairs_to_show = specified_pairs if specified_pairs else self.trading_pairs
+        symbols = [pair['symbol'] for pair in pairs_to_show]
+        
         self.logger.info("\n📋 当前挂单列表:")
         has_orders = False
         
-        for pair in self.trading_pairs:
+        for symbol in symbols:
             for client, client_name in [(self.client1, 'ACCOUNT1'), (self.client2, 'ACCOUNT2')]:
                 try:
-                    open_orders = client.get_open_orders(pair['symbol'])
+                    open_orders = client.get_open_orders(symbol)
                     if open_orders:
                         has_orders = True
-                        self.logger.info(f"\n   {client_name} - {pair['symbol']}:")
+                        self.logger.info(f"\n   {client_name} - {symbol}:")
                         for order in open_orders:
                             self.logger.info(f"      订单ID: {order.get('orderId')}")
                             self.logger.info(f"      方向: {order.get('side')}")
@@ -675,12 +713,12 @@ class CleanupMode:
                             self.logger.info(f"      状态: {order.get('status', 'UNKNOWN')}")
                             self.logger.info(f"      ---")
                 except Exception as e:
-                    self.logger.error(f"   获取 {client_name} {pair['symbol']} 挂单失败: {e}")
+                    self.logger.error(f"   获取 {client_name} {symbol} 挂单失败: {e}")
         
         if not has_orders:
             self.logger.info("   ℹ️  当前没有挂单")
 
-    def show_account_balances(self):
+    def show_account_balances(self, specified_tokens: List[str] = None):
         """显示账户余额"""
         self.logger.info("\n💰 账户余额:")
         
@@ -696,11 +734,13 @@ class CleanupMode:
                 usdt_balance = client.get_asset_balance('USDT')
                 self.logger.info(f"      USDT: {usdt_balance:.2f}")
                 
-                # 显示各交易对基础资产余额
-                for pair in self.trading_pairs:
-                    asset_balance = client.get_asset_balance(pair['base_asset'])
+                # 显示指定代币或所有代币余额
+                tokens_to_show = specified_tokens if specified_tokens else [pair['base_asset'] for pair in self.trading_pairs]
+                
+                for token in tokens_to_show:
+                    asset_balance = client.get_asset_balance(token)
                     if asset_balance > 0:
-                        self.logger.info(f"      {pair['base_asset']}: {asset_balance:.4f}")
+                        self.logger.info(f"      {token}: {asset_balance:.4f}")
             
         except Exception as e:
             self.logger.error(f"获取余额时出错: {e}")
@@ -710,31 +750,39 @@ class CleanupMode:
         self.is_monitoring = False
         self.logger.info("🛑 停止订单监控")
 
-    def run_cleanup(self, custom_price: float = None, monitor: bool = True, 
-                   show_balances: bool = False, show_orders: bool = False,
-                   max_monitor_time: int = 3600):
+    def run_cleanup(self, specified_tokens: List[str] = None, custom_price: float = None, 
+                   monitor: bool = True, show_balances: bool = False, 
+                   show_orders: bool = False, max_monitor_time: int = 3600):
         """运行清理模式"""
+        # 过滤交易对
+        specified_pairs = self.filter_trading_pairs(specified_tokens)
+        
+        if not specified_pairs:
+            self.logger.error("❌ 没有找到有效的交易对配置")
+            return
+        
         self.logger.info("🧹 启动清理模式...")
         self.logger.info("=" * 60)
         self.logger.info("清理模式操作:")
-        self.logger.info("1. 取消所有相关交易对的挂单")
+        self.logger.info(f"1. 处理代币: {', '.join([pair['base_asset'] for pair in specified_pairs])}")
+        self.logger.info("2. 取消相关交易对的挂单")
         if custom_price is not None:
-            self.logger.info(f"2. 以自定义价格 {custom_price:.6f} 挂限价单卖出所有相关代币")
+            self.logger.info(f"3. 以自定义价格 {custom_price:.6f} 挂限价单卖出指定代币")
         else:
-            self.logger.info("2. 以卖一价格挂限价单卖出所有相关代币")
+            self.logger.info("3. 以卖一价格挂限价单卖出指定代币")
         if monitor:
-            self.logger.info("3. 持续监控订单直到完全成交")
+            self.logger.info("4. 持续监控订单直到完全成交")
             self.logger.info(f"   最大监控时间: {max_monitor_time} 秒")
         if show_balances:
-            self.logger.info("4. 显示账户余额")
+            self.logger.info("5. 显示账户余额")
         if show_orders:
-            self.logger.info("5. 显示当前挂单")
+            self.logger.info("6. 显示当前挂单")
         self.logger.info("=" * 60)
         
         try:
             # 第一步：取消所有挂单
-            self.logger.info("🔄 第一步：取消所有相关交易对的挂单...")
-            self.cancel_all_open_orders()
+            self.logger.info("🔄 第一步：取消相关交易对的挂单...")
+            self.cancel_all_open_orders(specified_pairs)
             
             # 第二步：刷新余额缓存
             self.logger.info("🔄 第二步：刷新账户余额...")
@@ -743,7 +791,7 @@ class CleanupMode:
             
             # 第三步：创建限价卖单
             self.logger.info("🔄 第三步：开始挂限价卖单...")
-            orders_to_monitor = self.create_limit_sell_orders(custom_price)
+            orders_to_monitor = self.create_limit_sell_orders(specified_pairs, custom_price)
             
             if not orders_to_monitor:
                 self.logger.info("ℹ️  没有需要卖出的代币余额")
@@ -755,11 +803,12 @@ class CleanupMode:
             
             # 第五步：显示账户余额（如果启用）
             if show_balances:
-                self.show_account_balances()
+                token_list = [pair['base_asset'] for pair in specified_pairs]
+                self.show_account_balances(token_list)
             
             # 第六步：显示当前挂单（如果启用）
             if show_orders:
-                self.show_open_orders()
+                self.show_open_orders(specified_pairs)
                 
         except KeyboardInterrupt:
             self.logger.info("\n🛑 收到停止信号")
@@ -773,6 +822,8 @@ def main():
     parser = argparse.ArgumentParser(description='清理模式 - 取消所有订单并挂限价卖单')
     parser.add_argument('-c', '--config', type=str, default='.env', 
                        help='配置文件路径 (默认: .env)')
+    parser.add_argument('-t', '--tokens', type=str, nargs='+', metavar='TOKEN',
+                       help='指定要处理的代币 (例如: AT BTTC 或 ATUSDT BTTCUSDT)')
     parser.add_argument('-p', '--price', type=float, metavar='PRICE',
                        help='自定义卖出价格 (如未设置则使用卖一价格)')
     parser.add_argument('--no-monitor', action='store_true',
@@ -798,6 +849,7 @@ def main():
     try:
         # 运行清理模式
         cleanup.run_cleanup(
+            specified_tokens=args.tokens,
             custom_price=args.price,
             monitor=not args.no_monitor,
             show_balances=args.show_balances,
