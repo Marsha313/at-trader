@@ -265,6 +265,8 @@ class AsterDexClient:
 class CleanupMode:
     def __init__(self, config_file: str = ".env", log_filename: str = None):
         self.config_file = config_file
+        self.monitoring_orders = {}  # 存储监控中的订单
+        self.is_monitoring = False   # 监控状态
         
         if os.path.exists(config_file):
             load_dotenv(config_file)
@@ -389,12 +391,11 @@ class CleanupMode:
             self.logger.error(f"❌ 获取 {pair['symbol']} 市场数据失败: {e}")
             return None
 
-    def create_limit_sell_orders(self, custom_price: float = None):
-        """创建限价卖单"""
+    def create_limit_sell_orders(self, custom_price: float = None) -> List[Dict]:
+        """创建限价卖单，返回订单信息列表"""
         self.logger.info("🔄 开始创建限价卖单...")
         
-        total_sell_orders = 0
-        successful_sell_orders = 0
+        orders_to_monitor = []
         
         for pair in self.trading_pairs:
             self.logger.info(f"\n📊 处理交易对: {pair['symbol']}")
@@ -423,23 +424,235 @@ class CleanupMode:
                         )
                         
                         if 'orderId' in sell_order:
-                            total_sell_orders += 1
-                            successful_sell_orders += 1
+                            order_info = {
+                                'client': client,
+                                'client_name': client_name,
+                                'symbol': pair['symbol'],
+                                'order_id': sell_order['orderId'],
+                                'original_price': sell_price,
+                                'current_price': sell_price,
+                                'quantity': asset_balance,
+                                'base_asset': pair['base_asset'],
+                                'min_price_increment': pair['min_price_increment'],
+                                'status': 'NEW',
+                                'create_time': time.time()
+                            }
+                            orders_to_monitor.append(order_info)
+                            
                             self.logger.info(f"   ✅ {client_name} 限价卖单挂出成功:")
                             self.logger.info(f"      数量: {asset_balance:.4f} {pair['base_asset']}")
                             self.logger.info(f"      价格: {sell_price:.6f} USDT")
                             self.logger.info(f"      订单ID: {sell_order['orderId']}")
                         else:
-                            total_sell_orders += 1
                             self.logger.error(f"   ❌ {client_name} 限价卖单失败: {sell_order}")
                     else:
                         self.logger.info(f"   ℹ️  {client_name} 没有 {pair['base_asset']} 余额")
                         
                 except Exception as e:
-                    total_sell_orders += 1
                     self.logger.error(f"   ❌ {client_name} 处理 {pair['base_asset']} 卖出时出错: {e}")
         
-        return total_sell_orders, successful_sell_orders
+        return orders_to_monitor
+
+    def get_current_market_price(self, symbol: str) -> Tuple[float, float]:
+        """获取当前市场价格"""
+        try:
+            order_book = self.client1.get_order_book(symbol, limit=5)
+            if not order_book['bids'] or not order_book['asks']:
+                return 0, 0
+            
+            best_bid = order_book['bids'][0][0]
+            best_ask = order_book['asks'][0][0]
+            return best_bid, best_ask
+            
+        except Exception as e:
+            self.logger.error(f"获取 {symbol} 市场数据失败: {e}")
+            return 0, 0
+
+    def check_order_status(self, order_info: Dict) -> str:
+        """检查订单状态"""
+        try:
+            order_status = order_info['client'].get_order(order_info['symbol'], order_info['order_id'])
+            status = order_status.get('status', 'UNKNOWN')
+            executed_qty = float(order_status.get('executedQty', 0))
+            
+            # 更新订单信息
+            order_info['status'] = status
+            order_info['executed_qty'] = executed_qty
+            
+            return status
+            
+        except Exception as e:
+            self.logger.error(f"检查订单 {order_info['order_id']} 状态失败: {e}")
+            return 'UNKNOWN'
+
+    def should_adjust_price(self, order_info: Dict, current_ask: float) -> bool:
+        """判断是否需要调整价格"""
+        if current_ask == 0:
+            return False
+        
+        # 如果当前价格高于卖一价格，需要调整
+        if order_info['current_price'] > current_ask + order_info['min_price_increment']:
+            return True
+        
+        return False
+
+    def adjust_order_price(self, order_info: Dict, new_price: float) -> bool:
+        """调整订单价格"""
+        try:
+            self.logger.info(f"🔄 调整订单 {order_info['order_id']} 价格: {order_info['current_price']:.6f} -> {new_price:.6f}")
+            
+            # 先取消原订单
+            cancel_result = order_info['client'].cancel_order(order_info['symbol'], order_info['order_id'])
+            
+            if 'orderId' not in cancel_result and cancel_result.get('status') != 'FILLED':
+                self.logger.error(f"❌ 取消订单 {order_info['order_id']} 失败")
+                return False
+            
+            # 如果订单已成交，返回成功
+            if cancel_result.get('status') == 'FILLED':
+                self.logger.info(f"✅ 取消订单时发现订单已完全成交")
+                order_info['status'] = 'FILLED'
+                return True
+            
+            # 计算剩余数量
+            remaining_qty = order_info['quantity'] - order_info.get('executed_qty', 0)
+            if remaining_qty <= 0:
+                self.logger.info(f"✅ 订单已完全成交")
+                order_info['status'] = 'FILLED'
+                return True
+            
+            # 重新挂单
+            new_order = order_info['client'].create_order(
+                symbol=order_info['symbol'],
+                side='SELL',
+                order_type='LIMIT',
+                quantity=remaining_qty,
+                min_price_increment=order_info['min_price_increment'],
+                price=new_price
+            )
+            
+            if 'orderId' in new_order:
+                # 更新订单信息
+                order_info['order_id'] = new_order['orderId']
+                order_info['current_price'] = new_price
+                order_info['quantity'] = remaining_qty
+                order_info['status'] = 'NEW'
+                order_info['create_time'] = time.time()
+                
+                self.logger.info(f"✅ 订单价格调整成功，新订单ID: {new_order['orderId']}")
+                return True
+            else:
+                self.logger.error(f"❌ 重新挂单失败: {new_order}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"❌ 调整订单价格时出错: {e}")
+            return False
+
+    def monitor_orders_until_filled(self, orders_to_monitor: List[Dict], max_monitor_time: int = 3600):
+        """监控订单直到完全成交"""
+        self.logger.info(f"\n🔄 开始监控订单，最大监控时间: {max_monitor_time}秒")
+        self.is_monitoring = True
+        
+        start_time = time.time()
+        check_interval = 5  # 检查间隔（秒）
+        
+        while self.is_monitoring and time.time() - start_time < max_monitor_time:
+            active_orders = [order for order in orders_to_monitor if order['status'] not in ['FILLED', 'CANCELED', 'REJECTED']]
+            
+            if not active_orders:
+                self.logger.info("✅ 所有订单都已成交或取消")
+                break
+            
+            self.logger.info(f"\n📊 当前监控中的订单: {len(active_orders)} 个")
+            
+            for order_info in active_orders:
+                # 检查订单状态
+                status = self.check_order_status(order_info)
+                
+                if status == 'FILLED':
+                    self.logger.info(f"✅ {order_info['client_name']} - {order_info['symbol']} 订单已完全成交")
+                    continue
+                
+                elif status in ['CANCELED', 'REJECTED']:
+                    self.logger.warning(f"⚠️ {order_info['client_name']} - {order_info['symbol']} 订单状态: {status}")
+                    continue
+                
+                # 获取当前市场价格
+                current_bid, current_ask = self.get_current_market_price(order_info['symbol'])
+                
+                if current_ask > 0:
+                    # 检查是否需要调整价格
+                    if self.should_adjust_price(order_info, current_ask):
+                        # 计算新价格（卖一价格减一个最小变动单位）
+                        new_price = self.format_price(current_ask - order_info['min_price_increment'], order_info['min_price_increment'])
+                        if new_price <= current_bid:
+                            new_price = self.format_price(current_bid + order_info['min_price_increment'], order_info['min_price_increment'])
+                        
+                        self.logger.info(f"🔄 {order_info['client_name']} - {order_info['symbol']} 价格需要调整")
+                        self.logger.info(f"   当前订单价格: {order_info['current_price']:.6f}")
+                        self.logger.info(f"   当前卖一价格: {current_ask:.6f}")
+                        self.logger.info(f"   新价格: {new_price:.6f}")
+                        
+                        # 调整价格
+                        self.adjust_order_price(order_info, new_price)
+                    
+                    else:
+                        # 显示订单状态
+                        executed_qty = order_info.get('executed_qty', 0)
+                        fill_rate = (executed_qty / order_info['quantity']) * 100 if order_info['quantity'] > 0 else 0
+                        
+                        self.logger.info(f"📊 {order_info['client_name']} - {order_info['symbol']}:")
+                        self.logger.info(f"   状态: {status}")
+                        self.logger.info(f"   成交: {executed_qty:.4f}/{order_info['quantity']:.4f} ({fill_rate:.1f}%)")
+                        self.logger.info(f"   价格: {order_info['current_price']:.6f} (卖一: {current_ask:.6f})")
+                
+                else:
+                    self.logger.warning(f"⚠️ 无法获取 {order_info['symbol']} 的市场价格")
+            
+            # 等待下一次检查
+            if self.is_monitoring and any(order['status'] not in ['FILLED', 'CANCELED', 'REJECTED'] for order in orders_to_monitor):
+                elapsed_time = time.time() - start_time
+                self.logger.info(f"⏰ 已监控 {elapsed_time:.0f} 秒，{check_interval} 秒后继续检查...")
+                time.sleep(check_interval)
+        
+        # 监控结束
+        if time.time() - start_time >= max_monitor_time:
+            self.logger.warning(f"⏰ 达到最大监控时间 {max_monitor_time} 秒，停止监控")
+        
+        # 显示最终结果
+        self.show_monitoring_results(orders_to_monitor)
+
+    def show_monitoring_results(self, orders_to_monitor: List[Dict]):
+        """显示监控结果"""
+        self.logger.info("\n" + "=" * 60)
+        self.logger.info("📊 订单监控最终结果:")
+        
+        filled_orders = [o for o in orders_to_monitor if o['status'] == 'FILLED']
+        active_orders = [o for o in orders_to_monitor if o['status'] not in ['FILLED', 'CANCELED', 'REJECTED']]
+        failed_orders = [o for o in orders_to_monitor if o['status'] in ['CANCELED', 'REJECTED']]
+        
+        self.logger.info(f"   总订单数: {len(orders_to_monitor)}")
+        self.logger.info(f"   已成交: {len(filled_orders)}")
+        self.logger.info(f"   进行中: {len(active_orders)}")
+        self.logger.info(f"   失败/取消: {len(failed_orders)}")
+        
+        if filled_orders:
+            self.logger.info("\n✅ 已成交订单:")
+            for order in filled_orders:
+                self.logger.info(f"   {order['client_name']} - {order['symbol']}: {order['quantity']:.4f} @ {order['current_price']:.6f}")
+        
+        if active_orders:
+            self.logger.info("\n🔄 进行中订单:")
+            for order in active_orders:
+                executed_qty = order.get('executed_qty', 0)
+                fill_rate = (executed_qty / order['quantity']) * 100 if order['quantity'] > 0 else 0
+                self.logger.info(f"   {order['client_name']} - {order['symbol']}: {executed_qty:.4f}/{order['quantity']:.4f} ({fill_rate:.1f}%) @ {order['current_price']:.6f}")
+        
+        if failed_orders:
+            self.logger.info("\n❌ 失败/取消订单:")
+            for order in failed_orders:
+                self.logger.info(f"   {order['client_name']} - {order['symbol']}: {order['status']}")
 
     def show_open_orders(self):
         """显示当前挂单"""
@@ -492,7 +705,14 @@ class CleanupMode:
         except Exception as e:
             self.logger.error(f"获取余额时出错: {e}")
 
-    def run_cleanup(self, custom_price: float = None, show_balances: bool = False, show_orders: bool = False):
+    def stop_monitoring(self):
+        """停止监控"""
+        self.is_monitoring = False
+        self.logger.info("🛑 停止订单监控")
+
+    def run_cleanup(self, custom_price: float = None, monitor: bool = True, 
+                   show_balances: bool = False, show_orders: bool = False,
+                   max_monitor_time: int = 3600):
         """运行清理模式"""
         self.logger.info("🧹 启动清理模式...")
         self.logger.info("=" * 60)
@@ -502,45 +722,51 @@ class CleanupMode:
             self.logger.info(f"2. 以自定义价格 {custom_price:.6f} 挂限价单卖出所有相关代币")
         else:
             self.logger.info("2. 以卖一价格挂限价单卖出所有相关代币")
+        if monitor:
+            self.logger.info("3. 持续监控订单直到完全成交")
+            self.logger.info(f"   最大监控时间: {max_monitor_time} 秒")
         if show_balances:
-            self.logger.info("3. 显示账户余额")
+            self.logger.info("4. 显示账户余额")
         if show_orders:
-            self.logger.info("4. 显示当前挂单")
+            self.logger.info("5. 显示当前挂单")
         self.logger.info("=" * 60)
         
-        # 第一步：取消所有挂单
-        self.logger.info("🔄 第一步：取消所有相关交易对的挂单...")
-        self.cancel_all_open_orders()
-        
-        # 第二步：刷新余额缓存
-        self.logger.info("🔄 第二步：刷新账户余额...")
-        self.client1.refresh_balance_cache()
-        self.client2.refresh_balance_cache()
-        
-        # 第三步：创建限价卖单
-        self.logger.info("🔄 第三步：开始挂限价卖单...")
-        total_sell_orders, successful_sell_orders = self.create_limit_sell_orders(custom_price)
-        
-        # 第四步：显示账户余额（如果启用）
-        if show_balances:
-            self.show_account_balances()
-        
-        # 第五步：显示当前挂单（如果启用）
-        if show_orders:
-            self.show_open_orders()
-        
-        # 第六步：显示清理结果
-        self.logger.info("\n" + "=" * 60)
-        self.logger.info("🧹 清理模式完成!")
-        self.logger.info(f"   总挂单尝试: {total_sell_orders}")
-        self.logger.info(f"   成功挂单: {successful_sell_orders}")
-        self.logger.info(f"   失败挂单: {total_sell_orders - successful_sell_orders}")
-        
-        if successful_sell_orders > 0:
-            self.logger.info("\n💡 提示: 所有相关代币已挂限价卖单，请定期检查订单状态")
-            self.logger.info("💡 提示: 如需取消这些卖单，可重新运行清理模式")
-        else:
-            self.logger.info("\n💡 提示: 没有需要卖出的代币余额")
+        try:
+            # 第一步：取消所有挂单
+            self.logger.info("🔄 第一步：取消所有相关交易对的挂单...")
+            self.cancel_all_open_orders()
+            
+            # 第二步：刷新余额缓存
+            self.logger.info("🔄 第二步：刷新账户余额...")
+            self.client1.refresh_balance_cache()
+            self.client2.refresh_balance_cache()
+            
+            # 第三步：创建限价卖单
+            self.logger.info("🔄 第三步：开始挂限价卖单...")
+            orders_to_monitor = self.create_limit_sell_orders(custom_price)
+            
+            if not orders_to_monitor:
+                self.logger.info("ℹ️  没有需要卖出的代币余额")
+                return
+            
+            # 第四步：持续监控订单
+            if monitor:
+                self.monitor_orders_until_filled(orders_to_monitor, max_monitor_time)
+            
+            # 第五步：显示账户余额（如果启用）
+            if show_balances:
+                self.show_account_balances()
+            
+            # 第六步：显示当前挂单（如果启用）
+            if show_orders:
+                self.show_open_orders()
+                
+        except KeyboardInterrupt:
+            self.logger.info("\n🛑 收到停止信号")
+            self.stop_monitoring()
+        except Exception as e:
+            self.logger.error(f"❌ 程序运行出错: {e}")
+            self.stop_monitoring()
 
 def main():
     """主函数"""
@@ -549,6 +775,10 @@ def main():
                        help='配置文件路径 (默认: .env)')
     parser.add_argument('-p', '--price', type=float, metavar='PRICE',
                        help='自定义卖出价格 (如未设置则使用卖一价格)')
+    parser.add_argument('--no-monitor', action='store_true',
+                       help='不监控订单 (默认会监控直到成交)')
+    parser.add_argument('--monitor-time', type=int, default=3600,
+                       help='最大监控时间 (秒) (默认: 3600)')
     parser.add_argument('--show-balances', action='store_true',
                        help='显示账户余额')
     parser.add_argument('--show-orders', action='store_true',
@@ -569,11 +799,13 @@ def main():
         # 运行清理模式
         cleanup.run_cleanup(
             custom_price=args.price,
+            monitor=not args.no_monitor,
             show_balances=args.show_balances,
-            show_orders=args.show_orders
+            show_orders=args.show_orders,
+            max_monitor_time=args.monitor_time
         )
     except KeyboardInterrupt:
-        cleanup.logger.info("\n收到停止信号，程序退出")
+        cleanup.logger.info("\n程序退出")
     except Exception as e:
         cleanup.logger.error(f"程序运行出错: {e}")
 
